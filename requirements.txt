@@ -1,3 +1,4 @@
 claude-agent-sdk>=0.2.170
 openpyxl>=3.1
+pandas>=2.0
 streamlit>=1.40

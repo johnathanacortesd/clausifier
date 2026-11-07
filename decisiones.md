@@ -34,6 +34,19 @@ Versiones contra las que se probó: **Python SDK 0.2.176** (empaca Claude Code 2
 3. **Un hook corre antes que todo lo demás**: aunque cambies el modo de permisos, `Write` sigue
    sin poder salir de `entregas/`.
 
+## Limpieza antes de clasificar (agregado después)
+
+- **Qué**: `limpieza.py` porta de API_2_Grill solo la parte sin IA (carga con hipervínculos,
+  normalización, expansión de menciones, duplicados, orden por título). Va antes del agente porque
+  es determinista: no tiene sentido pagar tokens por algo que el código hace igual siempre.
+- **Duplicados**: el modelo no los ve; heredan Tono C / Tema C del original al guardar (por
+  "ID duplicada" + mención). Menos tokens y la misma clasificación garantizada para la misma nota.
+- **Fila**: tras expandir menciones el ID se repite, así que la clave de cada fila es "Fila".
+- **Región**: los mapas solo vienen de `REGIONES_CSV_URL` / `INTERNET_CSV_URL`; sin ellos, "N/A".
+  No portado: el analizador OpenAI, Jev/Typesafe, los PKL ni la columna "texto" (dependía de
+  `coherencia_texto`).
+- **Desactivar**: `--sin-limpiar` en la terminal, o desmarcar la casilla en la app.
+
 ## Qué probar después
 
 - Subir a `claude-sonnet-5-5` y comparar los tonos dudosos y el recibo.

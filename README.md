@@ -28,9 +28,25 @@ uv run agente.py --archivo "datos/noticias sec.xlsx" --cliente "Secretaría de E
 Otras columnas de texto: `--columnas "Título,Texto"` (por defecto `Título,Resumen - Aclaracion`).
 Si no pasas `--cliente` o `--archivo`, el programa te los pregunta en la consola.
 
-El resultado queda en `workspace\entregas\<nombre original>_clasificado.xlsx`: copia exacta del
-original (hojas, formatos y orden de filas intactos) con **Tono C** y **Tema C** al final. El
-original no se toca. Si queda alguna fila sin clasificar, la herramienta lo marca como error y
+Antes del agente corre una **limpieza determinista** (`limpieza.py`, sin IA, $0), portada de
+API_2_Grill: normaliza Tipo de Medio, Fecha (día/mes), títulos y cuerpos (entidades HTML), enlaces
+y números; pasa la duración de Radio/TV a Dimensión; separa cada mención de "Menciones - Empresa"
+(`;`) en su propia fila; marca duplicados (misma URL + mención, o en Radio/TV mismo medio + hora +
+mención) con el ID del original en **ID duplicada**; y ordena por título e ID. Conserva todas las
+columnas originales y agrega al final Región, Audio, Link Ext, Web Ext (solo formato Grill),
+ID duplicada y **Fila** (la clave única de cada fila). Queda en
+`workspace\entregas\<nombre>_limpio.xlsx`.
+
+El agente solo ve las filas NO duplicadas (ahorra tokens); al guardar, cada duplicado copia el
+Tono C / Tema C de su original. Para clasificar el xlsx tal cual: `--sin-limpiar`.
+
+Región: si defines `REGIONES_CSV_URL` (y opcionalmente `INTERNET_CSV_URL`, para renombrar medios de
+internet) como variables de entorno con un CSV de 2 columnas `medio,valor`, se llena la Región; sin
+ellas, o si fallan, queda la que traiga el archivo o "N/A". Máximo 1.000 filas por archivo.
+
+El resultado queda en `workspace\entregas\<nombre original>_clasificado.xlsx`: el xlsx limpio y
+ordenado (o la copia exacta del original con `--sin-limpiar`) con **Tono C** y **Tema C** al final.
+El original no se toca. Si queda alguna fila sin clasificar, la herramienta lo marca como error y
 el agente la completa.
 
 ### Comparar 5 portales
@@ -132,6 +148,7 @@ El porqué de cada decisión está en [decisiones.md](decisiones.md).
 | Archivo | Qué es |
 |---|---|
 | `agente.py` | el agente: tus dos funciones, el system prompt, las decisiones y el lector del stream |
+| `limpieza.py` | limpieza y orden deterministas (sin IA) antes de clasificar |
 | `hooks.py` | el vigilante: `Write` solo dentro de `entregas/` |
 | `credenciales.py` | lee `.env` y prepara la credencial |
 | `pyproject.toml` | las dependencias |
@@ -161,5 +178,9 @@ El porqué de cada decisión está en [decisiones.md](decisiones.md).
 ANTHROPIC_API_KEY = "sk-ant-..."
 APP_PASSWORD = "elige-una-contraseña"
 ```
+
+En la pestaña xlsx, la casilla **Limpiar y ordenar antes de clasificar** (marcada por defecto)
+muestra el resumen (filas, únicas, duplicadas, medios sin región). **Solo limpiar ($0)** no llama
+al modelo: limpia y ofrece el xlsx limpio para descargar.
 
 En local: copia `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml`, llénalo y corre `uv run streamlit run app.py`.

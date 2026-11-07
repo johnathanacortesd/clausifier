@@ -40,6 +40,8 @@ from hooks import HOOK  # la función vigilante vive en hooks.py, al lado
 
 import openpyxl
 
+import limpieza  # limpieza y orden deterministas (sin IA) antes de clasificar
+
 
 # ─── Paso 5 · tus funciones ───────────────────────────────────────────────
 # Claude NO ejecuta esto. Pide la herramienta por su nombre y este programa
@@ -135,10 +137,20 @@ async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
         i_medio = next((i for i, h in enumerate(encabezado) if _normal(h) == _normal("Medio")), None)
         i_fecha = next((i for i, h in enumerate(encabezado) if _normal(h) == _normal("Fecha")), None)
 
+        # Archivo limpio (limpieza.py): "Fila" es la clave única y los duplicados
+        # no se mandan al modelo (heredan la clasificación de su original al guardar).
+        i_fila = _buscar(encabezado, [limpieza.COL_FILA])
+        i_dup = _buscar(encabezado, [limpieza.COL_DUP])
+        if i_fila is not None:
+            i_id = i_fila
         grupos: dict[str, int] = {}
         salida = []
+        omitidos = 0
         for n, fila in enumerate(filas[1:], start=2):
             if not any(fila):
+                continue
+            if i_dup is not None and fila[i_dup] not in (None, ""):
+                omitidos += 1
                 continue
             clave = _normal(fila[idx[columnas[0]]])
             grupos.setdefault(clave, len(grupos) + 1)
@@ -154,8 +166,10 @@ async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:  # noqa: BLE001 — el error vuelve como contexto, no tumba al agente
         return {"content": [{"type": "text", "text": f"Error leyendo el archivo: {e}"}], "is_error": True}
 
-    print(f"  >>> leer_noticias: {len(salida)} noticias, {len(grupos)} títulos distintos")
-    texto = json.dumps({"archivo": ruta.name, "columnas_usadas": columnas, "total": len(salida), "noticias": salida},
+    print(f"  >>> leer_noticias: {len(salida)} noticias, {len(grupos)} títulos distintos"
+          f"{f', {omitidos} duplicados omitidos' if omitidos else ''}")
+    texto = json.dumps({"archivo": ruta.name, "columnas_usadas": columnas, "total": len(salida),
+                        "duplicados_omitidos": omitidos, "noticias": salida},
                        ensure_ascii=False, separators=(",", ":"))
     return {"content": [{"type": "text", "text": texto}]}
 
@@ -179,7 +193,7 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"tono inválido en ids {malos[:10]}: usa Positivo, Neutro o Negativo")
 
         ENTREGAS.mkdir(parents=True, exist_ok=True)
-        destino = ENTREGAS / f"{origen.stem}_clasificado.xlsx"
+        destino = ENTREGAS / f"{origen.stem.removesuffix('_limpio')}_clasificado.xlsx"
         if not destino.exists():
             shutil.copy2(origen, destino)     # copia exacta: hojas, formatos y orden intactos
         libro = openpyxl.load_workbook(destino)
@@ -192,19 +206,40 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
                 hoja.cell(row=1, column=len(encabezado) + 1, value=nombre)
                 encabezado.append(nombre)
         c_tono, c_tema = encabezado.index("Tono C") + 1, encabezado.index("Tema C") + 1
-        c_id = _buscar(encabezado, CANDIDATOS_ID)
+        c_fila = _buscar(encabezado, [limpieza.COL_FILA])
+        c_dup = _buscar(encabezado, [limpieza.COL_DUP])
+        c_noticia = _buscar(encabezado, CANDIDATOS_ID)
+        c_id = c_fila if c_fila is not None else c_noticia      # archivo limpio: "Fila" es la clave
         c_id = c_id + 1 if c_id is not None else None
+        c_men = _buscar(encabezado, ["Menciones - Empresa"])
+
+        def valor(r: int, c: int | None) -> Any:
+            return hoja.cell(row=r, column=c + 1).value if c is not None else None
 
         faltantes = []
+        duplicadas = []                        # filas que heredan de su original
+        originales: dict[tuple[str, str], int] = {}
         for r in range(2, hoja.max_row + 1):
             if all(c.value is None for c in hoja[r]):
                 continue
+            if c_dup is not None and valor(r, c_dup) not in (None, ""):
+                duplicadas.append(r)
+                continue
+            originales.setdefault((str(valor(r, c_noticia)), _normal(valor(r, c_men))), r)
+            originales.setdefault((str(valor(r, c_noticia)), ""), r)
             clave = str(hoja.cell(row=r, column=c_id).value) if c_id else str(r)
             if clave in nuevas:
                 hoja.cell(row=r, column=c_tono, value=nuevas[clave]["tono"])
                 hoja.cell(row=r, column=c_tema, value=nuevas[clave]["tema"])
             elif not hoja.cell(row=r, column=c_tema).value:
                 faltantes.append(clave)
+        # Cada duplicado copia Tono C / Tema C de su original (mismo ID y misma mención).
+        for r in duplicadas:
+            dup_id = str(valor(r, c_dup))
+            o = originales.get((dup_id, _normal(valor(r, c_men)))) or originales.get((dup_id, ""))
+            if o:
+                hoja.cell(row=r, column=c_tono, value=hoja.cell(row=o, column=c_tono).value)
+                hoja.cell(row=r, column=c_tema, value=hoja.cell(row=o, column=c_tema).value)
         libro.save(destino)
     except Exception as e:  # noqa: BLE001
         return {"content": [{"type": "text", "text": f"Error guardando: {e}"}], "is_error": True}
@@ -264,7 +299,7 @@ Consistencia, en este orden:
 </como_trabajas>
 
 <herramientas>
-- mcp__medios__leer_noticias: llámala una vez con el archivo y las columnas (vacío = por defecto). Te devuelve todas las filas con su id.
+- mcp__medios__leer_noticias: llámala una vez con el archivo y las columnas (vacío = por defecto). Te devuelve todas las filas con su id. Si el archivo viene limpio (entregas/..._limpio.xlsx), el id es la columna "Fila" y los duplicados ya vienen omitidos: no los pidas ni los clasifiques, heredan la clasificación de su original al guardar.
 - mcp__medios__guardar_clasificacion: pásale el archivo y la lista JSON de {id, tema, tono}. Manda todas las filas en una sola llamada si caben; si no, en tandas de unas 60. Si responde con un ERROR de filas faltantes, clasifica esos ids y vuelve a llamarla; sigue hasta que diga "Faltan por clasificar: 0". El resultado queda en las columnas "Tono C" y "Tema C" al final de la copia.
 - Agent (ayudante analista-portal): solo en el modo comparar portales, siguiendo la skill; lanza los cinco en paralelo, uno por portal. Nunca en el modo xlsx.
 - WebSearch y WebFetch: solo en el modo comparar portales, si hace falta completar lo que trajo un ayudante.
@@ -410,6 +445,18 @@ def armar_prompt(a: Any) -> str:
             "Clasifica todas las filas con TONO y TEMA y guárdalas con guardar_clasificacion.")
 
 
+def limpiar_antes(archivo: str) -> str:
+    """Limpia y ordena el xlsx (sin IA, $0) y devuelve la ruta del limpio para el agente."""
+    origen = _ruta(archivo)
+    destino = ENTREGAS / f"{origen.stem}_limpio.xlsx"
+    (ENTREGAS / f"{origen.stem}_clasificado.xlsx").unlink(missing_ok=True)   # no mezclar con corridas viejas
+    r = limpieza.limpiar_dossier(origen, destino)
+    print(f"🧹 limpieza: {r['total']} filas ({r['filas_expandidas']} por menciones), "
+          f"{r['unicos']} únicas, {r['duplicados']} duplicadas, "
+          f"{len(r['medios_sin_region'])} medios sin región → {destino.relative_to(AQUI)}")
+    return f"entregas/{destino.name}"
+
+
 def leer_argumentos() -> str:
     import argparse
     p = argparse.ArgumentParser(description="clausifier: clasifica noticias y compara portales")
@@ -420,6 +467,10 @@ def leer_argumentos() -> str:
     p.add_argument("--voceros", default="", help="personas que hablan por la marca, separadas por coma")
     p.add_argument("--archivo", help="xlsx relativo a workspace/, p. ej. datos/noticias.xlsx")
     p.add_argument("--columnas", default=COLUMNAS_TEXTO, help=f"por defecto: {COLUMNAS_TEXTO}")
+    p.add_argument("--limpiar", dest="limpiar", action="store_true", default=True,
+                   help="limpia y ordena el xlsx antes de clasificar (por defecto)")
+    p.add_argument("--sin-limpiar", dest="limpiar", action="store_false",
+                   help="clasifica el xlsx tal cual, sin limpieza previa")
     a = p.parse_args()
 
     usa_flags = any([a.cliente, a.archivo, a.alias, a.voceros, a.modo == "portales"])
@@ -435,6 +486,8 @@ def leer_argumentos() -> str:
             a.voceros = input("Voceros (opcional, separados por coma): ").strip()
     if a.modo == "xlsx" and not a.archivo:
         a.archivo = input("Archivo xlsx (relativo a workspace/, p. ej. datos/noticias.xlsx): ").strip()
+    if a.modo == "xlsx" and a.limpiar:
+        a.archivo = limpiar_antes(a.archivo)
     prompt = armar_prompt(a)
     if a.pedido:
         prompt += "\nIndicaciones adicionales: " + " ".join(a.pedido)
