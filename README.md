@@ -1,7 +1,7 @@
 # clausifier
 
-Clasifica las noticias de un xlsx de monitoreo para cualquier cliente: agrega a una copia del
-archivo dos columnas al final, **Tono** y **Subtema**. También compara cómo cubren al cliente
+Clasifica las noticias de un xlsx de monitoreo para cualquier cliente: entrega un xlsx con el layout
+exacto del export de API_2_Grill (26 columnas, con **Tono_IA** y **Subtema_IA**). También compara cómo cubren al cliente
 cinco portales colombianos (El Tiempo, El Espectador, Semana, Infobae Colombia y Caracol Radio).
 
 Hecho con el [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk).
@@ -45,14 +45,22 @@ car.). **texto** = Contexto analizado sin el Título. El agente juzga TONO y TEM
 (respaldo: texto, luego las columnas de cuerpo), en páginas de 25 noticias (~11-14k car. por página).
 
 El agente solo ve las filas NO duplicadas (ahorra tokens); al guardar, cada duplicado copia el
-Tono / Subtema de su original. Para clasificar el xlsx tal cual: `--sin-limpiar`.
+Tono_IA / Subtema_IA de su original. Para clasificar el xlsx tal cual: `--sin-limpiar`.
+
+**Revisión de consistencia** (al final, modo xlsx): la tool `candidatos_consistencia` (sin IA, rapidfuzz)
+arma grupos de filas que podrían ser el mismo hecho (mismo título, título ≥0.92, contexto ≥0.85,
+subtema casi idéntico) con tono/subtema distintos, y pares con el mismo subtema y contextos poco
+parecidos (posible sobreagrupación). El ayudante `revisor-subtemas` (Haiku) decide si cada grupo es
+el MISMO hecho y devuelve correcciones; el agente las guarda. Tope de gasto: 0.60 USD.
 
 Región: si defines `REGIONES_CSV_URL` (y opcionalmente `INTERNET_CSV_URL`, para renombrar medios de
 internet) como variables de entorno con un CSV de 2 columnas `medio,valor`, se llena la Región; sin
 ellas, o si fallan, queda la que traiga el archivo o "N/A". Máximo 1.000 filas por archivo.
 
-El resultado queda en `workspace\entregas\<nombre original>_clasificado.xlsx`: el xlsx limpio y
-ordenado (o la copia exacta del original con `--sin-limpiar`) con **Tono** y **Subtema** (al final si el archivo no las trae).
+El resultado queda en `workspace\entregas\<nombre original>_clasificado.xlsx` (`exportar.py`): EXACTAMENTE
+las 26 columnas del export de Grill (ID Noticia … Web Ext), con enlaces clicables, Fecha dd/mm/yyyy y
+CPE/Audiencia con miles. TIPO, GÉNERO, FECHA INFORME y HORA B se copian si vienen en la entrada;
+Grill no las deriva, así que si faltan quedan vacías. `Fila` solo vive en el `_limpio` (archivo de trabajo).
 El original no se toca. Si queda alguna fila sin clasificar, la herramienta lo marca como error y
 el agente la completa.
 

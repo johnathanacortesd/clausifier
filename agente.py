@@ -42,6 +42,7 @@ import openpyxl
 
 import limpieza  # limpieza y orden deterministas (sin IA) antes de clasificar
 import contexto  # Contexto analizado y texto, como API_2_Grill (sin IA)
+import exportar  # el xlsx final con el layout exacto del export de Grill
 
 
 # ─── Paso 5 · tus funciones ───────────────────────────────────────────────
@@ -104,7 +105,20 @@ def detectar_columnas(encabezado: list[Any]) -> list[str]:
     return elegidas
 
 
-COL_TONO, COL_SUBTEMA = "Tono", "Subtema"   # nombres de las columnas de salida (como en API_2_Grill)
+COL_TONO, COL_SUBTEMA = "Tono_IA", "Subtema_IA"   # columnas de salida (como el export de API_2_Grill)
+
+# Progreso para la app (las tools corren en este mismo proceso y lo actualizan).
+PROGRESO: dict[str, Any] = {}
+
+
+def reiniciar_progreso() -> None:
+    PROGRESO.clear()
+    PROGRESO.update(paso="Clasificando", total=0, leidas=0, pagina=0, paginas=0, faltan=None,
+                    guardadas=0, cambios_revision=0, revisado=False, subtemas_antes=None,
+                    subtemas_despues=None)
+
+
+reiniciar_progreso()
 POR_PAGINA =25          # noticias por llamada: con contextos de hasta 1200 car. la página queda < ~15k tokens
 TOPE_TEXTO = 1200        # caracteres de Contexto analizado por noticia (Grill lo arma con tope 2000)
 TOPE_TITULO = 160        # el título va solo como etiqueta corta, para agrupar e igual_a
@@ -185,6 +199,8 @@ async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
                         "duplicados_omitidos": omitidos, "noticias": pagina},
                        ensure_ascii=False, separators=(",", ":"))
     TAMANOS_PAGINA.append(len(texto))
+    PROGRESO.update(total=len(salida), leidas=max(PROGRESO.get("leidas", 0), desde + len(pagina)),
+                    pagina=desde // POR_PAGINA + 1, paginas=-(-len(salida) // POR_PAGINA) or 1)
     print(f"  >>> leer_noticias: filas {desde + 1}-{desde + len(pagina)} de {len(salida)}, "
           f"{len(grupos)} títulos distintos{f', {omitidos} duplicados omitidos' if omitidos else ''}"
           f"{f', {de_respaldo} sin contexto (columnas de respaldo)' if de_respaldo else ''}"
@@ -195,14 +211,39 @@ async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
 TAMANOS_PAGINA: list[int] = []   # caracteres del JSON de cada página (para medir)
 
 
+def _destino(origen: Path) -> Path:
+    return ENTREGAS / f"{origen.stem.removesuffix('_limpio').removesuffix('_trabajo')}_clasificado.xlsx"
+
+
+def _trabajo(origen: Path) -> Path:
+    """Archivo de trabajo con la clave interna "Fila": el _limpio de entregas/ (o una copia
+    _trabajo del original si se clasifica sin limpiar). El original nunca se toca."""
+    if origen.parent == ENTREGAS and origen.stem.endswith(("_limpio", "_trabajo")):
+        return origen
+    trabajo = ENTREGAS / f"{origen.stem}_trabajo.xlsx"
+    if not trabajo.exists() or not _destino(origen).exists():
+        ENTREGAS.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(origen, trabajo)
+    return trabajo
+
+
+def _cols_salida(hoja, encabezado: list[Any]) -> tuple[int, int]:
+    """Columnas Tono_IA / Subtema_IA (base 1): se reutilizan si existen, si no se agregan."""
+    for nombre in (COL_TONO, COL_SUBTEMA):
+        if _buscar(encabezado, [nombre]) is None:
+            hoja.cell(row=1, column=len(encabezado) + 1, value=nombre)
+            encabezado.append(nombre)
+    return _buscar(encabezado, [COL_TONO]) + 1, _buscar(encabezado, [COL_SUBTEMA]) + 1
+
+
 @tool(
     "guardar_clasificacion",
-    "Guarda TONO y TEMA (columnas 'Tono' y 'Subtema') en una COPIA exacta del xlsx "
-    "dentro de entregas/ (el original no se toca). "
+    "Guarda TONO y TEMA (columnas 'Tono_IA' y 'Subtema_IA') y escribe en entregas/ el xlsx final "
+    "con el layout de entrega (el original no se toca). "
     "'archivo': el mismo xlsx que leíste. 'filas_json': lista JSON "
     '[{"id":"123","tema":"...","tono":"Positivo|Neutro|Negativo"}, ...]. Puedes llamarla '
-    "varias veces por tandas: las filas ya guardadas se conservan. Devuelve cuántas filas "
-    "faltan por clasificar.",
+    "varias veces por tandas: las filas ya guardadas se conservan y las que repitas se corrigen. "
+    "Devuelve cuántas filas faltan por clasificar.",
     {"archivo": str, "filas_json": str},
 )
 async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
@@ -213,28 +254,19 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
         if malos:
             raise ValueError(f"tono inválido en ids {malos[:10]}: usa Positivo, Neutro o Negativo")
 
-        ENTREGAS.mkdir(parents=True, exist_ok=True)
-        destino = ENTREGAS / f"{origen.stem.removesuffix('_limpio')}_clasificado.xlsx"
+        destino = _destino(origen)
         nuevo = not destino.exists()
-        if nuevo:
-            shutil.copy2(origen, destino)     # copia exacta: hojas, formatos y orden intactos
-        libro = openpyxl.load_workbook(destino)
+        trabajo = _trabajo(origen)
+        libro = openpyxl.load_workbook(trabajo)
         hoja = libro.active
         encabezado = [c.value for c in hoja[1]]
         while encabezado and encabezado[-1] is None:
             encabezado.pop()
-        # Columnas de salida. Si el archivo ya trae "Tono"/"Subtema" (formato Grill), se
-        # reutilizan en su lugar y se vacían al crear la copia; si no, se agregan al FINAL.
-        for nombre in (COL_TONO, COL_SUBTEMA):
-            if _buscar(encabezado, [nombre]) is None:
-                hoja.cell(row=1, column=len(encabezado) + 1, value=nombre)
-                encabezado.append(nombre)
-        c_tono = _buscar(encabezado, [COL_TONO]) + 1
-        c_tema = _buscar(encabezado, [COL_SUBTEMA]) + 1
-        if nuevo:
-            for r in range(2, hoja.max_row + 1):
-                hoja.cell(row=r, column=c_tono, value=None)
-                hoja.cell(row=r, column=c_tema, value=None)
+        c_tono, c_tema = _cols_salida(hoja, encabezado)
+        if nuevo:                              # corrida nueva: se vacían las columnas de salida
+            for r in range(2, hoja.max_row + 1):   # OJO: cell(value=None) NO borra; hay que asignar .value
+                hoja.cell(row=r, column=c_tono).value = None
+                hoja.cell(row=r, column=c_tema).value = None
         c_fila = _buscar(encabezado, [limpieza.COL_FILA])
         c_dup = _buscar(encabezado, [limpieza.COL_DUP])
         c_noticia = _buscar(encabezado, CANDIDATOS_ID)
@@ -246,6 +278,7 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
             return hoja.cell(row=r, column=c + 1).value if c is not None else None
 
         faltantes = []
+        cambios = 0                            # filas ya clasificadas cuyo tono o tema cambió
         duplicadas = []                        # filas que heredan de su original
         originales: dict[tuple[str, str], int] = {}
         for r in range(2, hoja.max_row + 1):
@@ -258,8 +291,11 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
             originales.setdefault((str(valor(r, c_noticia)), ""), r)
             clave = str(hoja.cell(row=r, column=c_id).value) if c_id else str(r)
             if clave in nuevas:
-                hoja.cell(row=r, column=c_tono, value=nuevas[clave]["tono"])
-                hoja.cell(row=r, column=c_tema, value=nuevas[clave]["tema"])
+                antes = (hoja.cell(row=r, column=c_tono).value, hoja.cell(row=r, column=c_tema).value)
+                ahora = (nuevas[clave]["tono"], nuevas[clave]["tema"])
+                cambios += bool(antes[1]) and antes != ahora
+                hoja.cell(row=r, column=c_tono, value=ahora[0])
+                hoja.cell(row=r, column=c_tema, value=ahora[1])
             elif not hoja.cell(row=r, column=c_tema).value:
                 faltantes.append(clave)
         # Cada duplicado copia Tono / Subtema de su original (mismo ID y misma mención).
@@ -269,11 +305,20 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
             if o:
                 hoja.cell(row=r, column=c_tono, value=hoja.cell(row=o, column=c_tono).value)
                 hoja.cell(row=r, column=c_tema, value=hoja.cell(row=o, column=c_tema).value)
-        libro.save(destino)
+        subtemas = len({_normal(hoja.cell(row=r, column=c_tema).value) for r in range(2, hoja.max_row + 1)
+                        if hoja.cell(row=r, column=c_tema).value})
+        libro.save(trabajo)
+        exportar.exportar(trabajo, destino)    # el entregable: 26 columnas exactas, sin "Fila"
     except Exception as e:  # noqa: BLE001
         return {"content": [{"type": "text", "text": f"Error guardando: {e}"}], "is_error": True}
 
-    print(f"  >>> guardar_clasificacion: {len(nuevas)} filas → {destino.relative_to(AQUI)} (faltan {len(faltantes)})")
+    PROGRESO.update(guardadas=PROGRESO.get("guardadas", 0) + len(nuevas), faltan=len(faltantes),
+                    subtemas_despues=subtemas)
+    if PROGRESO.get("revisado"):
+        PROGRESO["cambios_revision"] = PROGRESO.get("cambios_revision", 0) + cambios
+        PROGRESO["paso"] = "Guardando"
+    print(f"  >>> guardar_clasificacion: {len(nuevas)} filas ({cambios} corregidas) → "
+          f"{destino.relative_to(AQUI)} (faltan {len(faltantes)}, {subtemas} subtemas distintos)")
     if faltantes:
         # Normal mientras se avanza por páginas; al final debe llegar a 0.
         ids = ", ".join(faltantes) if len(faltantes) <= 40 else ", ".join(faltantes[:40]) + ", ..."
@@ -285,8 +330,146 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
             f"Guardado en entregas/{destino.name}. Filas recibidas: {len(nuevas)}. Faltan por clasificar: 0."}]}
 
 
+# ─── Revisión de consistencia (determinista, sin IA) ──────────────────────
+UMBRAL_TITULO = 0.92      # como Grill: títulos casi iguales
+UMBRAL_CONTEXTO = 0.85    # como Grill: resúmenes casi iguales
+UMBRAL_SUBTEMA = 0.90     # subtemas con redacción casi idéntica
+UMBRAL_SOBRE = 0.35       # mismo subtema pero contextos muy distintos: posible sobreagrupación
+MIN_CTX = 120             # contextos más cortos ("Fuente: Alcaldía...") no sirven para comparar
+GRUPOS_POR_PAGINA = 30
+TOPE_CTX_GRUPO = 300
+
+try:
+    from rapidfuzz.fuzz import ratio as _rf_ratio
+
+    def _similitud(a: str, b: str) -> float:
+        return _rf_ratio(a, b) / 100.0
+except ImportError:  # respaldo sin dependencia
+    from difflib import SequenceMatcher
+
+    def _similitud(a: str, b: str) -> float:
+        return SequenceMatcher(None, a, b).ratio()
+
+
+def _simple(texto: Any) -> str:
+    t = unicodedata.normalize("NFKD", str(texto or "")).encode("ascii", "ignore").decode()
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", t.lower()).split())
+
+
+def construir_candidatos(ruta: Path) -> list[dict]:
+    """Grupos de filas que PODRÍAN ser el mismo hecho y no tienen el mismo tono/subtema,
+    más pares con el mismo subtema y contextos muy distintos (posible sobreagrupación)."""
+    hoja = openpyxl.load_workbook(ruta, read_only=True, data_only=True).active
+    filas = list(hoja.iter_rows(values_only=True))
+    enc = list(filas[0])
+    i_id = _buscar(enc, [limpieza.COL_FILA]) if _buscar(enc, [limpieza.COL_FILA]) is not None \
+        else _buscar(enc, CANDIDATOS_ID)
+    i_dup, i_tit = _buscar(enc, [limpieza.COL_DUP]), _buscar(enc, CANDIDATOS_TITULO)
+    i_ctx = next((i for i in (_buscar(enc, [c]) for c in COLUMNAS_CONTEXTO) if i is not None), None)
+    i_tono, i_tema = _buscar(enc, [COL_TONO]), _buscar(enc, [COL_SUBTEMA])
+    regs = []
+    for n, f in enumerate(filas[1:], start=2):
+        if not any(f) or (i_dup is not None and f[i_dup] not in (None, "")):
+            continue
+        g = lambda i: f[i] if i is not None and i < len(f) else None  # noqa: E731
+        regs.append({"id": str(g(i_id) if i_id is not None else n), "titulo": str(g(i_tit) or ""),
+                     "contexto": str(g(i_ctx) or ""), "tono": g(i_tono), "subtema": g(i_tema) or ""})
+    for r in regs:
+        r["_t"], r["_c"], r["_s"] = _simple(r["titulo"]), _simple(r["contexto"])[:600], _simple(r["subtema"])
+
+    padre = list(range(len(regs)))
+
+    def raiz(x: int) -> int:
+        while padre[x] != x:
+            padre[x] = padre[padre[x]]
+            x = padre[x]
+        return x
+
+    motivos: dict[tuple[int, int], str] = {}
+    sobre: list[tuple[int, int, float]] = []
+    for a in range(len(regs)):
+        for b in range(a + 1, len(regs)):
+            ra, rb = regs[a], regs[b]
+            motivo = None
+            if ra["_t"] and ra["_t"] == rb["_t"]:
+                motivo = "mismo título"
+            elif ra["_t"] and rb["_t"] and _similitud(ra["_t"], rb["_t"]) >= UMBRAL_TITULO:
+                motivo = "título casi igual"
+            elif min(len(ra["_c"]), len(rb["_c"])) >= MIN_CTX and _similitud(ra["_c"], rb["_c"]) >= UMBRAL_CONTEXTO:
+                motivo = "contexto casi igual"
+            elif ra["_s"] and rb["_s"] and ra["_s"] != rb["_s"] and _similitud(ra["_s"], rb["_s"]) >= UMBRAL_SUBTEMA:
+                motivo = "subtema con redacción casi idéntica"
+            if motivo:
+                motivos[(a, b)] = motivo
+                padre[raiz(a)] = raiz(b)
+            elif ra["_s"] and ra["_s"] == rb["_s"] and min(len(ra["_c"]), len(rb["_c"])) >= MIN_CTX:
+                sim = _similitud(ra["_c"], rb["_c"])
+                if sim < UMBRAL_SOBRE:
+                    sobre.append((a, b, sim))
+
+    def fila(i: int) -> dict:
+        r = regs[i]
+        return {"id": r["id"], "tono": r["tono"], "subtema": r["subtema"], "titulo": r["titulo"][:TOPE_TITULO],
+                "contexto": r["contexto"][:TOPE_CTX_GRUPO]}
+
+    grupos: dict[int, list[int]] = {}
+    for i in range(len(regs)):
+        grupos.setdefault(raiz(i), []).append(i)
+    salida = []
+    for miembros in grupos.values():
+        if len(miembros) < 2:
+            continue
+        if len({(regs[i]["tono"], regs[i]["_s"]) for i in miembros}) == 1:
+            continue                           # ya consistentes: no hace falta revisarlos
+        razones = sorted({m for (a, b), m in motivos.items() if a in miembros})
+        salida.append({"tipo": "posible_mismo_hecho", "motivo": ", ".join(razones),
+                       "filas": [fila(i) for i in miembros]})
+    # Sobreagrupación: un par por subtema (el de contextos más distintos).
+    por_subtema: dict[str, tuple[int, int, float]] = {}
+    for a, b, sim in sobre:
+        s = regs[a]["_s"]
+        if s not in por_subtema or sim < por_subtema[s][2]:
+            por_subtema[s] = (a, b, sim)
+    for a, b, sim in por_subtema.values():
+        salida.append({"tipo": "posible_sobreagrupacion",
+                       "motivo": f"mismo subtema, contextos poco parecidos ({sim:.2f})",
+                       "filas": [fila(a), fila(b)]})
+    for n, g in enumerate(salida):
+        g["grupo"] = n
+    return salida
+
+
+@tool(
+    "candidatos_consistencia",
+    "Revisión de consistencia (sin IA). Después de guardar TODAS las páginas, lee la clasificación "
+    "y devuelve grupos de filas que PODRÍAN ser el mismo hecho pero tienen distinto tono o subtema "
+    "(tipo 'posible_mismo_hecho'), y pares con el mismo subtema pero contextos muy distintos "
+    "(tipo 'posible_sobreagrupacion'). Cada fila trae id, tono, subtema, titulo y contexto (300 car.). "
+    f"'archivo': el mismo xlsx que leíste. 'desde': 0 y luego 'siguiente' ({GRUPOS_POR_PAGINA} grupos "
+    "por llamada) hasta null. Devuelve 'total' de grupos.",
+    {"archivo": str, "desde": int},
+)
+async def candidatos_consistencia(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        origen = _ruta(args["archivo"])
+        ruta = _trabajo(origen) if _destino(origen).exists() else origen
+        grupos = construir_candidatos(ruta)
+    except Exception as e:  # noqa: BLE001
+        return {"content": [{"type": "text", "text": f"Error buscando candidatos: {e}"}], "is_error": True}
+    desde = max(0, int(args.get("desde") or 0))
+    pagina = grupos[desde:desde + GRUPOS_POR_PAGINA]
+    siguiente = desde + GRUPOS_POR_PAGINA if desde + GRUPOS_POR_PAGINA < len(grupos) else None
+    if not PROGRESO.get("revisado"):
+        PROGRESO["subtemas_antes"] = PROGRESO.get("subtemas_despues")
+    PROGRESO.update(paso="Revisando consistencia", revisado=True, grupos=len(grupos))
+    print(f"  >>> candidatos_consistencia: grupos {desde + 1}-{desde + len(pagina)} de {len(grupos)}")
+    return {"content": [{"type": "text", "text": json.dumps(
+        {"total": len(grupos), "desde": desde, "siguiente": siguiente, "grupos": pagina},
+        ensure_ascii=False, separators=(",", ":"))}]}
+
+
 medios = create_sdk_mcp_server(
-    name="medios", version="1.0.0", tools=[leer_noticias, guardar_clasificacion]
+    name="medios", version="1.0.0", tools=[leer_noticias, guardar_clasificacion, candidatos_consistencia]
 )
 
 
@@ -329,11 +512,14 @@ Consistencia, en este orden:
 2. Agrupa las noticias con títulos o contextos iguales o similares ("igual_a" ya junta los títulos idénticos; tú juntas además las que cuentan el mismo hecho con otra redacción).
 3. A cada grupo dale exactamente el mismo TEMA y el mismo TONO. Reutiliza un tema existente cuando el hecho sea el mismo.
 4. Antes de guardar, repasa la lista de temas y fusiona los casi duplicados con redacción distinta.
+5. Revisión de consistencia, al final (solo modo xlsx): cuando guardar_clasificacion diga "Faltan por clasificar: 0", llama candidatos_consistencia con desde=0 para ver cuántos grupos hay ("total"). Si total es 0, terminas. Si no, lanza el ayudante revisor-subtemas con Agent pasándole el archivo y el rango de grupos (desde y cuántos); si hay más de 30 grupos, lanza dos en paralelo, cada uno con su mitad. No le copies los grupos: él los lee. Con sus correcciones llama UNA vez guardar_clasificacion con la lista [{id, tema, tono}] corregida (solo las filas que cambian). No repitas la revisión.
 </como_trabajas>
 
 <herramientas>
 - mcp__medios__leer_noticias: pasa siempre archivo y desde. Cada noticia trae id, medio, fecha, "titulo" (etiqueta corta) y "contexto" (Contexto analizado): juzga TONO y TEMA con "contexto". Devuelve páginas de noticias: empieza con desde=0, clasifica esa página, guárdala con guardar_clasificacion y pide la siguiente con el número de "siguiente", hasta que sea null. Lleva tu lista de temas ya usados de una página a otra y reutilízalos cuando el hecho sea el mismo. Las filas con "igual_a" tienen el mismo título que la fila indicada: mismo tema y tono. Si el archivo viene limpio (entregas/..._limpio.xlsx), el id es la columna "Fila" y los duplicados ya vienen omitidos: no los pidas ni los clasifiques, heredan la clasificación de su original al guardar.
-- mcp__medios__guardar_clasificacion: pásale el archivo y la lista JSON de {id, tema, tono} de la página que acabas de clasificar. Mientras queden páginas es normal que diga que faltan filas. Al terminar todas las páginas debe decir "Faltan por clasificar: 0"; si no, clasifica los ids que nombra y vuelve a llamarla. El resultado queda en las columnas "Tono" y "Subtema" de la copia.
+- mcp__medios__guardar_clasificacion: pásale el archivo y la lista JSON de {id, tema, tono} de la página que acabas de clasificar. Mientras queden páginas es normal que diga que faltan filas. Al terminar todas las páginas debe decir "Faltan por clasificar: 0"; si no, clasifica los ids que nombra y vuelve a llamarla. El resultado queda en las columnas "Tono_IA" y "Subtema_IA" del xlsx final.
+- mcp__medios__candidatos_consistencia: solo después de guardar todas las páginas (paso 5). Devuelve grupos candidatos, sin decidir nada.
+- Agent (ayudante revisor-subtemas): solo en el modo xlsx, en el paso 5. Devuelve JSON con correcciones; tú las guardas.
 - Agent (ayudante analista-portal): solo en el modo comparar portales, siguiendo la skill; lanza los cinco en paralelo, uno por portal. Nunca en el modo xlsx.
 - WebSearch y WebFetch: solo en el modo comparar portales, si hace falta completar lo que trajo un ayudante.
 - Write: solo para escribir dentro de entregas/ (por ejemplo entregas/comparativo.md).
@@ -362,6 +548,7 @@ opciones = ClaudeAgentOptions(
     allowed_tools=[                           # paso 5: qué puede hacer en el mundo
         "mcp__medios__leer_noticias",
         "mcp__medios__guardar_clasificacion",
+        "mcp__medios__candidatos_consistencia",
         "WebSearch",
         "WebFetch",
         "Write",
@@ -396,14 +583,42 @@ opciones = ClaudeAgentOptions(
             model="haiku",                    # trabajo de búsqueda: modelo barato
             maxTurns=8,                       # OJO: camelCase también en Python
         ),
+        "revisor-subtemas": AgentDefinition(
+            description=(
+                "Revisa la consistencia de Tono_IA y Subtema_IA en el modo xlsx: decide si cada grupo "
+                "candidato es el MISMO hecho y devuelve correcciones en JSON. Úsalo una vez al final, "
+                "después de guardar todas las páginas; pásale el archivo y el rango de grupos."
+            ),
+            prompt=(
+                "Eres revisor de consistencia de una clasificación de noticias en español. Recibes un "
+                "ARCHIVO y un rango de grupos (desde y cuántos). Lee los grupos con "
+                "mcp__medios__candidatos_consistencia (archivo, desde), solo los de tu rango.\n"
+                "Para cada grupo decide si sus filas cuentan el MISMO hecho: el mismo evento, la misma "
+                "entidad y el mismo momento. Mismo tema general o mismo medio NO es el mismo hecho.\n"
+                "- Si es el mismo hecho: todas las filas llevan un solo subtema (reutiliza el más "
+                "específico de los que ya tienen) y un solo tono (el que mejor sostiene el contexto).\n"
+                "- Si no lo es: déjalas separadas y haz cada subtema lo bastante específico (4 a 7 "
+                "palabras) para distinguirlas. Los grupos 'posible_sobreagrupacion' casi siempre son "
+                "hechos distintos que comparten un subtema demasiado genérico.\n"
+                "Nunca fusiones solo porque los subtemas comparten palabras. No agrupes por agrupar.\n"
+                "Tono solo Positivo, Neutro o Negativo, para el cliente. No escribes archivos.\n"
+                "Responde SOLO con JSON compacto, sin texto alrededor: "
+                '{"correcciones":[{"id":"...","tema":"...","tono":"..."}],'
+                '"grupos":[{"grupo":0,"mismo_hecho":true,"razon":"una línea"}]}. '
+                "En correcciones incluye solo las filas cuyo tema o tono cambia."
+            ),
+            tools=["mcp__medios__candidatos_consistencia"],
+            model="haiku",
+            maxTurns=6,
+        ),
     },
     forward_subagent_text=True,               # paso 7: ver también el TEXTO del ayudante
     permission_mode="default",                # paso 8: aprueba solo lo de allowed_tools
     disallowed_tools=["Bash", "Edit", "Read", "Grep", "Glob"],   # paso 8: nada de leer volcados por fuera de las tools
     hooks={"PreToolUse": [HookMatcher(matcher="Write|Edit", hooks=[HOOK])]},   # paso 9: escribe solo en entregas/
     cwd=WORKSPACE,                            # la carpeta que el agente ve (junto a este archivo)
-    max_turns=60,                             # freno: hasta 1000 filas = 25 páginas × (leer + guardar)
-    max_budget_usd=0.40,                      # freno: tope de gasto (modo portales: TOPE_PORTALES)
+    max_turns=70,                             # freno: páginas × (leer + guardar) + revisión de consistencia
+    max_budget_usd=0.60,                      # freno: clasificar + revisión (modo portales: TOPE_PORTALES)
     stderr=lambda linea: None,                # cambia a print(linea, end="") para depurar
 )
 
@@ -458,6 +673,14 @@ def imprimir_error_de_tool(mensaje: Any) -> None:
 PROMPT = ""
 FALLO = [False]
 TOPE_PORTALES = 0.60                          # 5 ayudantes en paralelo: cada uno paga sus tokens
+TOPE_CLASIFICAR = 0.60                        # clasificar + revisor-subtemas
+
+
+def exportar_limpio(limpio: Path) -> Path:
+    """Solo limpiar: el mismo layout de 26 columnas, con Tono_IA/Subtema_IA vacías."""
+    destino = limpio.with_name(f"{limpio.stem}_export.xlsx")
+    exportar.exportar(limpio, destino, con_ia=False)
+    return destino
 
 
 def armar_prompt(a: Any) -> str:

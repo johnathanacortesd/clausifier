@@ -70,19 +70,83 @@ import agente  # noqa: E402 — después de fijar la credencial
 from claude_agent_sdk import ClaudeSDKError, query  # noqa: E402
 
 
-async def correr(prompt: str, salida) -> None:
+def _paso_por_herramienta(mensaje, modo: str) -> str | None:
+    """Paso actual según la herramienta que pide el agente principal (no los ayudantes)."""
+    if getattr(mensaje, "parent_tool_use_id", None) or not isinstance(mensaje, agente.AssistantMessage):
+        return None
+    for b in mensaje.content:
+        if isinstance(b, agente.ToolUseBlock):
+            if b.name in ("Agent", "Task"):
+                return "Revisando consistencia" if modo == "xlsx" else "Buscando en portales"
+            if b.name.endswith("candidatos_consistencia"):
+                return "Revisando consistencia"
+            if b.name == "Write":
+                return "Guardando"
+    return None
+
+
+async def correr(prompt: str, vista, modo: str = "xlsx") -> dict:
+    """Corre el agente mostrando solo un progreso limpio; el log completo queda en el resultado."""
     buffer = io.StringIO()
     agente.FALLO[0] = False
+    agente.reiniciar_progreso()
+    agente.PROGRESO["paso"] = "Clasificando" if modo == "xlsx" else "Buscando en portales"
+    final = {"turnos": 0, "costo": 0.0}
     with contextlib.redirect_stdout(buffer):
         try:
             async for mensaje in query(prompt=prompt, options=agente.opciones):
                 agente.imprimir(mensaje)
                 agente.imprimir_error_de_tool(mensaje)
-                salida.code(buffer.getvalue()[-6000:], language=None)
+                paso = _paso_por_herramienta(mensaje, modo)
+                if paso and not (agente.PROGRESO.get("revisado") and paso == "Clasificando"):
+                    agente.PROGRESO["paso"] = paso
+                if isinstance(mensaje, agente.ResultMessage):
+                    # Con el ayudante en segundo plano llegan dos ResultMessage: turnos por tramo,
+                    # costo acumulado de la sesión.
+                    final = {"turnos": final["turnos"] + (mensaje.num_turns or 0),
+                             "costo": max(final["costo"], mensaje.total_cost_usd or 0.0)}
+                vista(agente.PROGRESO)
         except ClaudeSDKError as error:
             print(f"\n⚠️  el agente paró: {error}")
             agente.FALLO[0] = True
-    salida.code(buffer.getvalue()[-6000:], language=None)
+    final["log"] = buffer.getvalue()
+    return final
+
+
+def vista_progreso():
+    """Devuelve una función que pinta paso + barra + conteo en placeholders fijos."""
+    paso_ph, barra_ph, texto_ph = st.empty(), st.empty(), st.empty()
+
+    def pintar(p: dict) -> None:
+        paso_ph.markdown(f"**{p.get('paso', '…')}**")
+        total = p.get("total") or 0
+        if total:
+            barra_ph.progress(min(1.0, p.get("leidas", 0) / total))
+            texto_ph.caption(f"Página {p.get('pagina', 0)} de {p.get('paginas', 0)} · "
+                             f"{p.get('leidas', 0)} de {total} noticias")
+    return pintar
+
+
+def resumen_final(destino, final: dict) -> None:
+    import openpyxl
+    from collections import Counter
+    tonos: Counter = Counter()
+    filas = 0
+    if destino is not None and destino.exists():
+        hoja = openpyxl.load_workbook(destino, read_only=True).active
+        enc = [c for c in next(hoja.iter_rows(max_row=1, values_only=True))]
+        i_t = enc.index("Tono_IA") if "Tono_IA" in enc else None
+        for f in hoja.iter_rows(min_row=2, values_only=True):
+            if any(f):
+                filas += 1
+                if i_t is not None:
+                    tonos[f[i_t] or "sin tono"] += 1
+    partes = [f"{filas} filas"] if filas else []
+    partes += [f"{k}: {v}" for k, v in tonos.most_common()]
+    partes.append(f"${final.get('costo', 0):.3f} · {final.get('turnos', 0)} turnos")
+    if agente.PROGRESO.get("revisado"):
+        partes.append(f"{agente.PROGRESO.get('cambios_revision', 0)} correcciones de consistencia")
+    st.caption(" · ".join(partes))
 
 
 # ─── Formulario ───────────────────────────────────────────────────────────
@@ -135,7 +199,8 @@ with tab_xlsx:
     if solo_limpiar:
         limpio = limpiar_y_mostrar(guardar_subido())
         if limpio and limpio.exists():
-            st.download_button("⬇️ Descargar xlsx limpio", limpio.read_bytes(), file_name=limpio.name,
+            entrega = agente.exportar_limpio(limpio)     # mismas 26 columnas, Tono_IA/Subtema_IA vacías
+            st.download_button("⬇️ Descargar xlsx limpio", entrega.read_bytes(), file_name=limpio.name,
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     if clasificar:
         nombre = guardar_subido()
@@ -146,11 +211,15 @@ with tab_xlsx:
             st.stop()
         args = SimpleNamespace(modo="xlsx", cliente=cliente, alias=alias, voceros=voceros,
                                archivo=f"entregas/{limpio.name}")
-        agente.opciones.max_budget_usd = 0.40
+        agente.opciones.max_budget_usd = agente.TOPE_CLASIFICAR
+        (agente.ENTREGAS / f"{os.path.splitext(nombre)[0]}_trabajo.xlsx").unlink(missing_ok=True)
         with st.status("Clasificando…", expanded=True) as estado:
-            asyncio.run(correr(agente.armar_prompt(args), st.empty()))
+            final = asyncio.run(correr(agente.armar_prompt(args), vista_progreso(), "xlsx"))
+            resumen_final(destino, final)
             estado.update(label="Terminó con errores" if agente.FALLO[0] else "Listo",
                           state="error" if agente.FALLO[0] else "complete")
+        with st.expander("Ver detalle técnico"):      # fuera del status: no se anidan expanders
+            st.code(final["log"][-20000:], language=None)
         if destino.exists():
             st.download_button("⬇️ Descargar xlsx clasificado", destino.read_bytes(),
                                file_name=destino.name,
@@ -165,9 +234,12 @@ with tab_portales:
                                archivo=None)
         agente.opciones.max_budget_usd = agente.TOPE_PORTALES
         with st.status("Buscando en portales…", expanded=True) as estado:
-            asyncio.run(correr(agente.armar_prompt(args), st.empty()))
+            final = asyncio.run(correr(agente.armar_prompt(args), vista_progreso(), "portales"))
+            resumen_final(None, final)
             estado.update(label="Terminó con errores" if agente.FALLO[0] else "Listo",
                           state="error" if agente.FALLO[0] else "complete")
+        with st.expander("Ver detalle técnico"):
+            st.code(final["log"][-20000:], language=None)
         if comparativo.exists():
             texto = comparativo.read_text(encoding="utf-8")
             st.markdown(texto)

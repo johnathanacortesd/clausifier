@@ -2,3 +2,5 @@ claude-agent-sdk>=0.2.170
 openpyxl>=3.1
 pandas>=2.0
 streamlit>=1.40
+rapidfuzz>=3.0
+xlsxwriter>=3.0

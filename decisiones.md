@@ -65,3 +65,11 @@ Versiones contra las que se probó: **Python SDK 0.2.176** (empaca Claude Code 2
 - Subir a `claude-sonnet-5-5` y comparar los tonos dudosos y el recibo.
 - Ajustar el párrafo de TONO del system prompt con ejemplos reales de tu equipo.
 - Poner `stderr` en modo depuración si algo falla sin mensaje.
+
+## Revisión de consistencia y layout de entrega (agregado después)
+
+- **Layout**: el xlsx final lo escribe `exportar.py` con las 26 columnas exactas de `noticias sec.xlsx` (export de Grill). El estado de la clasificación vive en el `_limpio` (con `Fila`); cada `guardar_clasificacion` re-exporta. Solo limpiar usa el mismo layout con Tono_IA/Subtema_IA vacías.
+- **Candidatos sin IA, decisión con IA**: agrupar es determinista (rapidfuzz, umbrales de Grill); decidir si es el mismo hecho lo hace `revisor-subtemas` (Haiku, solo la tool de candidatos). Solo se mandan grupos inconsistentes + pares sospechosos de sobreagrupación, así cuesta poco (~0.02 USD en 189 filas).
+- Contextos de menos de 120 car. (p. ej. 'Fuente: Alcaldía de Bogotá') no cuentan para similitud: encadenaban hechos distintos.
+- Bug corregido: `hoja.cell(..., value=None)` no borra en openpyxl; ahora se asigna `.value = None` al empezar una corrida (antes una entrada ya clasificada dejaba el 'faltan 0' sin sentido).
+- App: el log crudo va a 'Ver detalle técnico'; la vista muestra paso, barra de páginas y resumen. El ayudante corre en segundo plano y llegan dos ResultMessage: se suman turnos y se toma el costo acumulado.
