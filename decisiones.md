@@ -39,13 +39,26 @@ Versiones contra las que se probó: **Python SDK 0.2.176** (empaca Claude Code 2
 - **Qué**: `limpieza.py` porta de API_2_Grill solo la parte sin IA (carga con hipervínculos,
   normalización, expansión de menciones, duplicados, orden por título). Va antes del agente porque
   es determinista: no tiene sentido pagar tokens por algo que el código hace igual siempre.
-- **Duplicados**: el modelo no los ve; heredan Tono C / Tema C del original al guardar (por
+- **Duplicados**: el modelo no los ve; heredan Tono / Subtema del original al guardar (por
   "ID duplicada" + mención). Menos tokens y la misma clasificación garantizada para la misma nota.
 - **Fila**: tras expandir menciones el ID se repite, así que la clave de cada fila es "Fila".
 - **Región**: los mapas solo vienen de `REGIONES_CSV_URL` / `INTERNET_CSV_URL`; sin ellos, "N/A".
-  No portado: el analizador OpenAI, Jev/Typesafe, los PKL ni la columna "texto" (dependía de
-  `coherencia_texto`).
-- **Desactivar**: `--sin-limpiar` en la terminal, o desmarcar la casilla en la app.
+  No portado: el analizador OpenAI, Jev/Typesafe y los PKL.
+- **Desactivar**: `--sin-limpiar` en la terminal (sin limpieza ni Contexto: el agente usa las
+  columnas de cuerpo). En la app la limpieza ya no es opcional.
+
+## Contexto analizado (agregado después)
+
+- **Qué**: `contexto.py` porta de API_2_Grill el extracto de menciones (`_texto_contexto_fila`,
+  `_contexto_exacto_marca`, `_contexto_con_titulo_y_extension`) y la columna "texto". Corre tras la
+  limpieza, en terminal y app (también en "Solo limpiar", que por eso exige cliente).
+- **Por qué**: el modelo juzga el tono por lo que se dice del cliente, no por el tono general de la
+  nota; y enviar solo el extracto (más el título como etiqueta) ahorra tokens frente al cuerpo.
+- **Página**: 25 noticias, contexto recortado a 1200 car.; en `noticias sec.xlsx` cada página mide
+  5,7-13,8k caracteres (≈2-5k tokens). Corrida real: 18 turnos, $0.036, 0 filas faltantes.
+- **Reconstruido**: `texto_sin_titulo` y `expandir_voceros` vivían en `coherencia_texto.py`, que no
+  estaba en la copia de Grill; se rehicieron según su README. Los duplicados también reciben
+  Contexto (Grill les pone "-").
 
 ## Qué probar después
 

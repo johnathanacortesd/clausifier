@@ -1,7 +1,7 @@
 # clausifier
 
 Clasifica las noticias de un xlsx de monitoreo para cualquier cliente: agrega a una copia del
-archivo dos columnas al final, **Tono C** y **Tema C**. También compara cómo cubren al cliente
+archivo dos columnas al final, **Tono** y **Subtema**. También compara cómo cubren al cliente
 cinco portales colombianos (El Tiempo, El Espectador, Semana, Infobae Colombia y Caracol Radio).
 
 Hecho con el [Claude Agent SDK](https://code.claude.com/docs/en/agent-sdk).
@@ -25,7 +25,6 @@ uv sync                        # la primera vez: instala el SDK y openpyxl
 uv run agente.py --archivo "datos/noticias sec.xlsx" --cliente "Secretaría de Educación" --alias "SED" --voceros "Nombre Apellido"
 ```
 
-Otras columnas de texto: `--columnas "Título,Texto"` (por defecto `Título,Resumen - Aclaracion`).
 Si no pasas `--cliente` o `--archivo`, el programa te los pregunta en la consola.
 
 Antes del agente corre una **limpieza determinista** (`limpieza.py`, sin IA, $0), portada de
@@ -37,15 +36,23 @@ columnas originales y agrega al final Región, Audio, Link Ext, Web Ext (solo fo
 ID duplicada y **Fila** (la clave única de cada fila). Queda en
 `workspace\entregas\<nombre>_limpio.xlsx`.
 
+Después, `contexto.py` (sin IA, $0, portado de API_2_Grill) escribe **Contexto analizado** y
+**texto** en el limpio (si ya existen, las recalcula): oraciones literales del CuerpoEs (o del cuerpo
+que mencione al cliente) con mención del cliente, alias o voceros (también nombre + primer apellido),
+deduplicadas, tope 2000 car. (1200 en Radio/TV), cortadas al 3er punto; título al inicio si lo
+menciona; si no hay mención, el lead; se extiende una oración si queda corto (≤60 palabras o ≤370
+car.). **texto** = Contexto analizado sin el Título. El agente juzga TONO y TEMA solo con esa columna
+(respaldo: texto, luego las columnas de cuerpo), en páginas de 25 noticias (~11-14k car. por página).
+
 El agente solo ve las filas NO duplicadas (ahorra tokens); al guardar, cada duplicado copia el
-Tono C / Tema C de su original. Para clasificar el xlsx tal cual: `--sin-limpiar`.
+Tono / Subtema de su original. Para clasificar el xlsx tal cual: `--sin-limpiar`.
 
 Región: si defines `REGIONES_CSV_URL` (y opcionalmente `INTERNET_CSV_URL`, para renombrar medios de
 internet) como variables de entorno con un CSV de 2 columnas `medio,valor`, se llena la Región; sin
 ellas, o si fallan, queda la que traiga el archivo o "N/A". Máximo 1.000 filas por archivo.
 
 El resultado queda en `workspace\entregas\<nombre original>_clasificado.xlsx`: el xlsx limpio y
-ordenado (o la copia exacta del original con `--sin-limpiar`) con **Tono C** y **Tema C** al final.
+ordenado (o la copia exacta del original con `--sin-limpiar`) con **Tono** y **Subtema** (al final si el archivo no las trae).
 El original no se toca. Si queda alguna fila sin clasificar, la herramienta lo marca como error y
 el agente la completa.
 
@@ -91,7 +98,7 @@ nunca lo subas a git.
 
 [init] skill «comparar-portales» cargada: True
 [init] servidores: [('medios', 'connected')]
-🔧 mcp__medios__leer_noticias(archivo=datos/noticias sec.xlsx, columnas=Título,Resumen - Aclaracion)
+🔧 mcp__medios__leer_noticias(archivo=entregas/noticias sec_limpio.xlsx, desde=0)
   >>> leer_noticias: 189 noticias, 158 títulos distintos
 🔧 mcp__medios__guardar_clasificacion(archivo=datos/noticias sec.xlsx, filas_json=[…])
   >>> guardar_clasificacion: 68 filas → workspace\entregas\noticias sec_clasificado.xlsx (faltan 0)
@@ -165,7 +172,7 @@ El porqué de cada decisión está en [decisiones.md](decisiones.md).
 | `[auth] Falta …` | `.env` incompleto: el mensaje dice qué falta |
 | `Invalid API key` / `401` | la key de `.env` no sirve: pégala de nuevo |
 | `Credit balance is too low` | la organización de la key no tiene créditos |
-| `No existe la columna '…'` | pasa `--columnas` con los nombres reales del encabezado |
+| `No encuentro título ni contexto` | el xlsx no trae Título ni columnas de cuerpo reconocibles |
 | `error_max_budget_usd` | archivo grande: sube `max_budget_usd` |
 
 ## App web (Streamlit)
@@ -179,8 +186,9 @@ ANTHROPIC_API_KEY = "sk-ant-..."
 APP_PASSWORD = "elige-una-contraseña"
 ```
 
-En la pestaña xlsx, la casilla **Limpiar y ordenar antes de clasificar** (marcada por defecto)
-muestra el resumen (filas, únicas, duplicadas, medios sin región). **Solo limpiar ($0)** no llama
-al modelo: limpia y ofrece el xlsx limpio para descargar.
+En la pestaña xlsx siempre se limpia y se agrega Contexto analizado y texto antes de clasificar
+(muestra filas, únicas, duplicadas, medios sin región y cuántas filas tienen mención). No hay que
+elegir columnas: el agente lee el Contexto analizado. **Solo limpiar ($0)** no llama al modelo:
+limpia, agrega Contexto analizado y texto y ofrece el xlsx para descargar (pide el cliente).
 
 En local: copia `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml`, llénalo y corre `uv run streamlit run app.py`.

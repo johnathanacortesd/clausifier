@@ -73,7 +73,7 @@ async def correr(prompt: str, salida) -> None:
 
 # ─── Formulario ───────────────────────────────────────────────────────────
 st.title("📰 clausifier")
-st.caption("Clasifica noticias (Tono C y Tema C) y compara la cobertura de un cliente en 5 portales.")
+st.caption("Clasifica noticias (Tono y Subtema) y compara la cobertura de un cliente en 5 portales.")
 
 cliente = st.text_input("Cliente (marca) *")
 alias = st.text_input("Alias (opcional, separados por coma)")
@@ -83,20 +83,8 @@ tab_xlsx, tab_portales = st.tabs(["Clasificar xlsx", "Comparar portales"])
 
 with tab_xlsx:
     subido = st.file_uploader("Archivo xlsx", type=["xlsx"])
-    columnas = ""
-    if subido:
-        import openpyxl
-        hoja = openpyxl.load_workbook(io.BytesIO(subido.getvalue()), read_only=True).active
-        encabezado = [h for h in next(hoja.iter_rows(max_row=1, values_only=True)) if h]
-        sugeridas = agente.detectar_columnas(encabezado)
-        elegidas = st.multiselect("Columnas con el texto de la noticia (título primero)",
-                                  [str(h) for h in encabezado], default=sugeridas)
-        if not elegidas:
-            st.warning("Elige al menos una columna con el título o el cuerpo de la noticia.")
-        columnas = ",".join(elegidas)
-    limpiar = st.checkbox("Limpiar y ordenar antes de clasificar", value=True,
-                          help="Sin IA ($0): normaliza columnas, expande menciones, marca duplicados "
-                               "y ordena por título. Los duplicados no se mandan al modelo.")
+    st.caption("Pipeline: limpieza de API_2_Grill → Contexto analizado y texto (sin IA, $0) → "
+               "el agente clasifica Tono y Subtema leyendo solo el Contexto analizado.")
 
     def guardar_subido() -> str:
         datos = agente.WORKSPACE / "datos"
@@ -109,6 +97,8 @@ with tab_xlsx:
         try:
             limpio = agente.ENTREGAS / f"{os.path.splitext(nombre)[0]}_limpio.xlsx"
             r = agente.limpieza.limpiar_dossier(agente.WORKSPACE / "datos" / nombre, limpio)
+            c = agente.contexto.agregar_contexto(limpio, cliente, agente.separar(alias),
+                                                 agente.separar(voceros))
         except Exception as e:  # noqa: BLE001 — p. ej. más de 1000 filas
             st.error(f"No se pudo limpiar: {e}")
             return None
@@ -119,11 +109,15 @@ with tab_xlsx:
         c4.metric("Medios sin región", len(r["medios_sin_region"]))
         if r["medios_sin_region"]:
             st.caption("Sin región: " + ", ".join(r["medios_sin_region"][:30]))
+        st.caption(f"Contexto analizado: {c['con_mencion']} con mención del cliente, "
+                   f"{c['desde_lead']} desde el lead, {c['solo_titulo']} solo título.")
         return limpio
 
     b1, b2 = st.columns(2)
-    solo_limpiar = b2.button("Solo limpiar ($0)", disabled=not subido)
-    clasificar = b1.button("Clasificar", type="primary", disabled=not (cliente and subido and columnas))
+    solo_limpiar = b2.button("Solo limpiar ($0)", disabled=not (cliente and subido))
+    clasificar = b1.button("Clasificar", type="primary", disabled=not (cliente and subido))
+    if (subido and not cliente):
+        st.info("Escribe el cliente: el Contexto analizado se arma con sus menciones.")
     if solo_limpiar:
         limpio = limpiar_y_mostrar(guardar_subido())
         if limpio and limpio.exists():
@@ -133,14 +127,11 @@ with tab_xlsx:
         nombre = guardar_subido()
         destino = agente.ENTREGAS / f"{os.path.splitext(nombre)[0]}_clasificado.xlsx"
         destino.unlink(missing_ok=True)                    # no reutilizar una corrida anterior
-        archivo = f"datos/{nombre}"
-        if limpiar:
-            limpio = limpiar_y_mostrar(nombre)
-            if limpio is None:
-                st.stop()
-            archivo = f"entregas/{limpio.name}"
+        limpio = limpiar_y_mostrar(nombre)
+        if limpio is None:
+            st.stop()
         args = SimpleNamespace(modo="xlsx", cliente=cliente, alias=alias, voceros=voceros,
-                               archivo=archivo, columnas=columnas)
+                               archivo=f"entregas/{limpio.name}")
         agente.opciones.max_budget_usd = 0.40
         with st.status("Clasificando…", expanded=True) as estado:
             asyncio.run(correr(agente.armar_prompt(args), st.empty()))
@@ -157,7 +148,7 @@ with tab_portales:
         comparativo = agente.ENTREGAS / "comparativo.md"
         comparativo.unlink(missing_ok=True)
         args = SimpleNamespace(modo="portales", cliente=cliente, alias=alias, voceros=voceros,
-                               archivo=None, columnas=agente.COLUMNAS_TEXTO)
+                               archivo=None)
         agente.opciones.max_budget_usd = agente.TOPE_PORTALES
         with st.status("Buscando en portales…", expanded=True) as estado:
             asyncio.run(correr(agente.armar_prompt(args), st.empty()))

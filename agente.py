@@ -41,6 +41,7 @@ from hooks import HOOK  # la función vigilante vive en hooks.py, al lado
 import openpyxl
 
 import limpieza  # limpieza y orden deterministas (sin IA) antes de clasificar
+import contexto  # Contexto analizado y texto, como API_2_Grill (sin IA)
 
 
 # ─── Paso 5 · tus funciones ───────────────────────────────────────────────
@@ -48,9 +49,6 @@ import limpieza  # limpieza y orden deterministas (sin IA) antes de clasificar
 # la corre. Los nombres completos que ve el modelo son:
 #     mcp__medios__leer_noticias   y   mcp__medios__guardar_clasificacion
 # (el prefijo sale de la CLAVE del dict mcp_servers, no del name= de abajo)
-
-COLUMNAS_POR_DEFECTO = ["Título", "Resumen - Aclaracion"]
-
 
 def _normal(texto: Any) -> str:
     """minúsculas, sin tildes ni signos: para comparar nombres y títulos."""
@@ -106,33 +104,37 @@ def detectar_columnas(encabezado: list[Any]) -> list[str]:
     return elegidas
 
 
+COL_TONO, COL_SUBTEMA = "Tono", "Subtema"   # nombres de las columnas de salida (como en API_2_Grill)
+POR_PAGINA =25          # noticias por llamada: con contextos de hasta 1200 car. la página queda < ~15k tokens
+TOPE_TEXTO = 1200        # caracteres de Contexto analizado por noticia (Grill lo arma con tope 2000)
+TOPE_TITULO = 160        # el título va solo como etiqueta corta, para agrupar e igual_a
+COLUMNAS_CONTEXTO = [contexto.COL_CONTEXTO, contexto.COL_TEXTO]   # orden de preferencia
+
+
 @tool(
     "leer_noticias",
-    "Lee un archivo .xlsx de monitoreo de medios y devuelve una fila por noticia con id, "
-    "medio, fecha, el texto de las columnas pedidas y 'grupo' (noticias con el mismo título "
-    "comparten grupo). 'archivo': nombre o ruta del xlsx (p. ej. 'datos/noticias sec.xlsx'). "
-    "'columnas': nombres separados por ',' o '|'; vacío o inexistentes = detecta solas título y "
-    "cuerpo (Título, Resumen - Aclaracion, CuerpoEs...). La respuesta dice qué columnas usó.",
-    {"archivo": str, "columnas": str},
+    "Lee un archivo .xlsx de monitoreo de medios y devuelve una fila por noticia con id, medio, "
+    "fecha, 'titulo' (etiqueta corta) y 'contexto' (el Contexto analizado: las oraciones literales "
+    "donde aparece el cliente). TONO y TEMA se juzgan desde 'contexto'. "
+    "'archivo': nombre o ruta del xlsx (p. ej. 'entregas/noticias sec_limpio.xlsx'). "
+    f"Devuelve PÁGINAS de {POR_PAGINA} noticias: 'desde' = 0 la primera vez y luego el número "
+    "que diga 'siguiente', hasta que 'siguiente' sea null. Las filas con 'igual_a' repiten el "
+    "título de otra fila: dales su mismo tema y tono.",
+    {"archivo": str, "desde": int},
 )
 async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
     try:
         ruta = _ruta(args["archivo"])
-        columnas = [c.strip() for c in re.split(r"[|,]", args.get("columnas") or "") if c.strip()]
         hoja = openpyxl.load_workbook(ruta, read_only=True, data_only=True).active
         filas = list(hoja.iter_rows(values_only=True))
         encabezado = list(filas[0])
-        # Usa las columnas pedidas que existan; si ninguna existe, detecta título y cuerpo solas.
-        idx = {}
-        for c in columnas:
-            i = _buscar(encabezado, [c])
-            if i is not None:
-                idx[str(encabezado[i])] = i
-        if not idx:
-            idx = {c: _columna(encabezado, c) for c in detectar_columnas(encabezado)}
-        if not idx:
-            raise KeyError(f"No encuentro columnas de título ni de cuerpo. Columnas: {[h for h in encabezado if h]}")
-        columnas = list(idx)
+        i_tit = _buscar(encabezado, CANDIDATOS_TITULO)
+        # Fuente del contexto: Contexto analizado → texto → columnas de cuerpo detectadas (respaldo).
+        fuentes = [i for i in (_buscar(encabezado, [c]) for c in COLUMNAS_CONTEXTO) if i is not None]
+        respaldo = [_columna(encabezado, c) for c in detectar_columnas(encabezado)
+                    if _buscar(encabezado, [c]) != i_tit and c not in COLUMNAS_CONTEXTO]
+        if i_tit is None and not fuentes and not respaldo:
+            raise KeyError(f"No encuentro título ni contexto. Columnas: {[h for h in encabezado if h]}")
         i_id = _buscar(encabezado, CANDIDATOS_ID)
         i_medio = next((i for i, h in enumerate(encabezado) if _normal(h) == _normal("Medio")), None)
         i_fecha = next((i for i, h in enumerate(encabezado) if _normal(h) == _normal("Fecha")), None)
@@ -143,40 +145,59 @@ async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
         i_dup = _buscar(encabezado, [limpieza.COL_DUP])
         if i_fila is not None:
             i_id = i_fila
-        grupos: dict[str, int] = {}
+        grupos: dict[str, str] = {}
         salida = []
         omitidos = 0
+        de_respaldo = 0
         for n, fila in enumerate(filas[1:], start=2):
             if not any(fila):
                 continue
             if i_dup is not None and fila[i_dup] not in (None, ""):
                 omitidos += 1
                 continue
-            clave = _normal(fila[idx[columnas[0]]])
-            grupos.setdefault(clave, len(grupos) + 1)
+            titulo = str(fila[i_tit] or "") if i_tit is not None else ""
+            clave = _normal(titulo)
+            fila_id = str(fila[i_id]) if i_id is not None else str(n)
             registro = {
-                "id": str(fila[i_id]) if i_id is not None else str(n),
-                "grupo": grupos[clave],
+                "id": fila_id,
                 "medio": fila[i_medio] if i_medio is not None else None,
                 "fecha": str(fila[i_fecha])[:10] if i_fecha is not None else None,
+                "titulo": titulo[:TOPE_TITULO],
             }
-            for c, i in idx.items():
-                registro[c] = str(fila[i] or "")[:350]   # señal, no volcados
+            if titulo and clave in grupos:
+                registro["igual_a"] = grupos[clave]      # mismo título: no repetir el contexto
+            else:
+                grupos.setdefault(clave, fila_id)
+                texto = next((str(fila[i]).strip() for i in fuentes if str(fila[i] or "").strip()), "")
+                if not texto:
+                    texto = " | ".join(str(fila[i]).strip() for i in respaldo if str(fila[i] or "").strip())
+                    de_respaldo += bool(texto)
+                registro["contexto"] = texto[:TOPE_TEXTO]
             salida.append(registro)
     except Exception as e:  # noqa: BLE001 — el error vuelve como contexto, no tumba al agente
         return {"content": [{"type": "text", "text": f"Error leyendo el archivo: {e}"}], "is_error": True}
 
-    print(f"  >>> leer_noticias: {len(salida)} noticias, {len(grupos)} títulos distintos"
-          f"{f', {omitidos} duplicados omitidos' if omitidos else ''}")
-    texto = json.dumps({"archivo": ruta.name, "columnas_usadas": columnas, "total": len(salida),
-                        "duplicados_omitidos": omitidos, "noticias": salida},
+    desde = max(0, int(args.get("desde") or 0))
+    pagina = salida[desde:desde + POR_PAGINA]
+    siguiente = desde + POR_PAGINA if desde + POR_PAGINA < len(salida) else None
+    texto = json.dumps({"archivo": ruta.name, "total": len(salida),
+                        "desde": desde, "siguiente": siguiente,
+                        "duplicados_omitidos": omitidos, "noticias": pagina},
                        ensure_ascii=False, separators=(",", ":"))
+    TAMANOS_PAGINA.append(len(texto))
+    print(f"  >>> leer_noticias: filas {desde + 1}-{desde + len(pagina)} de {len(salida)}, "
+          f"{len(grupos)} títulos distintos{f', {omitidos} duplicados omitidos' if omitidos else ''}"
+          f"{f', {de_respaldo} sin contexto (columnas de respaldo)' if de_respaldo else ''}"
+          f" · {len(texto):,} car.")
     return {"content": [{"type": "text", "text": texto}]}
+
+
+TAMANOS_PAGINA: list[int] = []   # caracteres del JSON de cada página (para medir)
 
 
 @tool(
     "guardar_clasificacion",
-    "Guarda TONO y TEMA (columnas 'Tono C' y 'Tema C', al final) en una COPIA exacta del xlsx "
+    "Guarda TONO y TEMA (columnas 'Tono' y 'Subtema') en una COPIA exacta del xlsx "
     "dentro de entregas/ (el original no se toca). "
     "'archivo': el mismo xlsx que leíste. 'filas_json': lista JSON "
     '[{"id":"123","tema":"...","tono":"Positivo|Neutro|Negativo"}, ...]. Puedes llamarla '
@@ -194,18 +215,26 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
 
         ENTREGAS.mkdir(parents=True, exist_ok=True)
         destino = ENTREGAS / f"{origen.stem.removesuffix('_limpio')}_clasificado.xlsx"
-        if not destino.exists():
+        nuevo = not destino.exists()
+        if nuevo:
             shutil.copy2(origen, destino)     # copia exacta: hojas, formatos y orden intactos
         libro = openpyxl.load_workbook(destino)
         hoja = libro.active
         encabezado = [c.value for c in hoja[1]]
         while encabezado and encabezado[-1] is None:
             encabezado.pop()
-        for nombre in ("Tono C", "Tema C"):   # dos columnas nuevas al FINAL, en este orden
-            if nombre not in encabezado:
+        # Columnas de salida. Si el archivo ya trae "Tono"/"Subtema" (formato Grill), se
+        # reutilizan en su lugar y se vacían al crear la copia; si no, se agregan al FINAL.
+        for nombre in (COL_TONO, COL_SUBTEMA):
+            if _buscar(encabezado, [nombre]) is None:
                 hoja.cell(row=1, column=len(encabezado) + 1, value=nombre)
                 encabezado.append(nombre)
-        c_tono, c_tema = encabezado.index("Tono C") + 1, encabezado.index("Tema C") + 1
+        c_tono = _buscar(encabezado, [COL_TONO]) + 1
+        c_tema = _buscar(encabezado, [COL_SUBTEMA]) + 1
+        if nuevo:
+            for r in range(2, hoja.max_row + 1):
+                hoja.cell(row=r, column=c_tono, value=None)
+                hoja.cell(row=r, column=c_tema, value=None)
         c_fila = _buscar(encabezado, [limpieza.COL_FILA])
         c_dup = _buscar(encabezado, [limpieza.COL_DUP])
         c_noticia = _buscar(encabezado, CANDIDATOS_ID)
@@ -233,7 +262,7 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
                 hoja.cell(row=r, column=c_tema, value=nuevas[clave]["tema"])
             elif not hoja.cell(row=r, column=c_tema).value:
                 faltantes.append(clave)
-        # Cada duplicado copia Tono C / Tema C de su original (mismo ID y misma mención).
+        # Cada duplicado copia Tono / Subtema de su original (mismo ID y misma mención).
         for r in duplicadas:
             dup_id = str(valor(r, c_dup))
             o = originales.get((dup_id, _normal(valor(r, c_men)))) or originales.get((dup_id, ""))
@@ -246,10 +275,12 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
 
     print(f"  >>> guardar_clasificacion: {len(nuevas)} filas → {destino.relative_to(AQUI)} (faltan {len(faltantes)})")
     if faltantes:
-        # Una fila sin clasificar es un ERROR, no un hueco silencioso: el modelo debe completarla.
+        # Normal mientras se avanza por páginas; al final debe llegar a 0.
+        ids = ", ".join(faltantes) if len(faltantes) <= 40 else ", ".join(faltantes[:40]) + ", ..."
         return {"content": [{"type": "text", "text":
-                f"Guardado parcial en entregas/{destino.name}. ERROR: faltan {len(faltantes)} filas sin "
-                f"clasificar, ids: {', '.join(faltantes)}. Clasifícalas y vuelve a llamar."}], "is_error": True}
+                f"Guardado parcial en entregas/{destino.name}. Faltan por clasificar: {len(faltantes)} "
+                f"(ids: {ids}). Si quedan páginas, sigue leyendo; si ya leíste todas, clasifica esos "
+                "ids y vuelve a llamar."}]}
     return {"content": [{"type": "text", "text":
             f"Guardado en entregas/{destino.name}. Filas recibidas: {len(nuevas)}. Faltan por clasificar: 0."}]}
 
@@ -271,7 +302,7 @@ Trabajas dentro de la carpeta workspace/. Los archivos de entrada están en dato
 
 <objetivo>
 Tienes dos modos. Elige según lo que pida el usuario:
-1. Clasificar un xlsx: el usuario te da el archivo, el nombre del CLIENTE (marca) y, opcionalmente, ALIAS, VOCEROS y las columnas con el texto de la noticia (por defecto "Título" y "Resumen - Aclaracion"). A cada fila le asignas TEMA y TONO y los guardas en una copia del archivo.
+1. Clasificar un xlsx: el usuario te da el archivo, el nombre del CLIENTE (marca) y, opcionalmente, ALIAS y VOCEROS. Antes de llegarte, el archivo ya viene limpio y con la columna "Contexto analizado" (las oraciones literales donde aparece el cliente). A cada fila le asignas TEMA y TONO y los guardas en una copia del archivo.
 2. Comparar portales: el usuario te da un CLIENTE (y quizá ALIAS y VOCEROS) y quiere ver cómo lo cubren cinco portales colombianos con las noticias más recientes. Para eso usa la skill comparar-portales.
 Si falta el cliente o el archivo (en el modo 1), pídelos en una frase y termina sin llamar herramientas: adivinar el cliente cambia todo el tono.
 Sirves para cualquier cliente: no supongas ninguno que el usuario no haya nombrado.
@@ -284,6 +315,8 @@ Sirves para cualquier cliente: no supongas ninguno que el usuario no haya nombra
 </cliente_alias_voceros>
 
 <como_trabajas>
+TONO y TEMA se juzgan desde el "contexto" de cada noticia (la columna Contexto analizado), no desde el título: el título es solo una etiqueta para agrupar.
+
 TEMA: una frase específica de 4 a 7 palabras que defina realmente la noticia y la distinga de otras. Evita temas genéricos como "Seguridad en Bogotá" o "Gestión de la alcaldía": un lector debe saber de qué hecho se trata solo con el tema.
 
 TONO: Positivo, Neutro o Negativo, evaluado solo desde la perspectiva del cliente, no del tono general de la noticia. Una tragedia puede ser Positiva para el cliente si muestra su gestión a favor.
@@ -293,14 +326,14 @@ TONO: Positivo, Neutro o Negativo, evaluado solo desde la perspectiva del client
 
 Consistencia, en este orden:
 1. Lee TODAS las filas antes de asignar nada.
-2. Agrupa las noticias con títulos o resúmenes iguales o similares (el campo "grupo" ya junta los títulos idénticos; tú juntas además los que cuentan el mismo hecho con otra redacción).
+2. Agrupa las noticias con títulos o contextos iguales o similares ("igual_a" ya junta los títulos idénticos; tú juntas además las que cuentan el mismo hecho con otra redacción).
 3. A cada grupo dale exactamente el mismo TEMA y el mismo TONO. Reutiliza un tema existente cuando el hecho sea el mismo.
 4. Antes de guardar, repasa la lista de temas y fusiona los casi duplicados con redacción distinta.
 </como_trabajas>
 
 <herramientas>
-- mcp__medios__leer_noticias: llámala una vez con el archivo y las columnas (vacío = por defecto). Te devuelve todas las filas con su id. Si el archivo viene limpio (entregas/..._limpio.xlsx), el id es la columna "Fila" y los duplicados ya vienen omitidos: no los pidas ni los clasifiques, heredan la clasificación de su original al guardar.
-- mcp__medios__guardar_clasificacion: pásale el archivo y la lista JSON de {id, tema, tono}. Manda todas las filas en una sola llamada si caben; si no, en tandas de unas 60. Si responde con un ERROR de filas faltantes, clasifica esos ids y vuelve a llamarla; sigue hasta que diga "Faltan por clasificar: 0". El resultado queda en las columnas "Tono C" y "Tema C" al final de la copia.
+- mcp__medios__leer_noticias: pasa siempre archivo y desde. Cada noticia trae id, medio, fecha, "titulo" (etiqueta corta) y "contexto" (Contexto analizado): juzga TONO y TEMA con "contexto". Devuelve páginas de noticias: empieza con desde=0, clasifica esa página, guárdala con guardar_clasificacion y pide la siguiente con el número de "siguiente", hasta que sea null. Lleva tu lista de temas ya usados de una página a otra y reutilízalos cuando el hecho sea el mismo. Las filas con "igual_a" tienen el mismo título que la fila indicada: mismo tema y tono. Si el archivo viene limpio (entregas/..._limpio.xlsx), el id es la columna "Fila" y los duplicados ya vienen omitidos: no los pidas ni los clasifiques, heredan la clasificación de su original al guardar.
+- mcp__medios__guardar_clasificacion: pásale el archivo y la lista JSON de {id, tema, tono} de la página que acabas de clasificar. Mientras queden páginas es normal que diga que faltan filas. Al terminar todas las páginas debe decir "Faltan por clasificar: 0"; si no, clasifica los ids que nombra y vuelve a llamarla. El resultado queda en las columnas "Tono" y "Subtema" de la copia.
 - Agent (ayudante analista-portal): solo en el modo comparar portales, siguiendo la skill; lanza los cinco en paralelo, uno por portal. Nunca en el modo xlsx.
 - WebSearch y WebFetch: solo en el modo comparar portales, si hace falta completar lo que trajo un ayudante.
 - Write: solo para escribir dentro de entregas/ (por ejemplo entregas/comparativo.md).
@@ -366,10 +399,10 @@ opciones = ClaudeAgentOptions(
     },
     forward_subagent_text=True,               # paso 7: ver también el TEXTO del ayudante
     permission_mode="default",                # paso 8: aprueba solo lo de allowed_tools
-    disallowed_tools=["Bash", "Edit"],        # paso 8: allowed_tools aprueba; esto prohíbe
+    disallowed_tools=["Bash", "Edit", "Read", "Grep", "Glob"],   # paso 8: nada de leer volcados por fuera de las tools
     hooks={"PreToolUse": [HookMatcher(matcher="Write|Edit", hooks=[HOOK])]},   # paso 9: escribe solo en entregas/
     cwd=WORKSPACE,                            # la carpeta que el agente ve (junto a este archivo)
-    max_turns=25,                             # freno: máximo de vueltas del ciclo
+    max_turns=60,                             # freno: hasta 1000 filas = 25 páginas × (leer + guardar)
     max_budget_usd=0.40,                      # freno: tope de gasto (modo portales: TOPE_PORTALES)
     stderr=lambda linea: None,                # cambia a print(linea, end="") para depurar
 )
@@ -425,7 +458,6 @@ def imprimir_error_de_tool(mensaje: Any) -> None:
 PROMPT = ""
 FALLO = [False]
 TOPE_PORTALES = 0.60                          # 5 ayudantes en paralelo: cada uno paga sus tokens
-COLUMNAS_TEXTO = ",".join(COLUMNAS_POR_DEFECTO)
 
 
 def armar_prompt(a: Any) -> str:
@@ -441,12 +473,15 @@ def armar_prompt(a: Any) -> str:
                 "Busca las noticias más recientes del cliente (usa cliente, alias y voceros en las "
                 "búsquedas) en cinco portales colombianos y escribe entregas/comparativo.md.")
     return (f"Modo clasificar xlsx.\nARCHIVO: {a.archivo}\nCLIENTE: {a.cliente}{extra_txt}\n"
-            f"COLUMNAS: {a.columnas}\n"
             "Clasifica todas las filas con TONO y TEMA y guárdalas con guardar_clasificacion.")
 
 
-def limpiar_antes(archivo: str) -> str:
-    """Limpia y ordena el xlsx (sin IA, $0) y devuelve la ruta del limpio para el agente."""
+def separar(texto: str | None) -> list[str]:
+    return [x.strip() for x in (texto or "").split(",") if x.strip()]
+
+
+def limpiar_antes(archivo: str, cliente: str, alias: str = "", voceros: str = "") -> str:
+    """Limpia, ordena y agrega Contexto analizado (sin IA, $0) y devuelve la ruta del limpio para el agente."""
     origen = _ruta(archivo)
     destino = ENTREGAS / f"{origen.stem}_limpio.xlsx"
     (ENTREGAS / f"{origen.stem}_clasificado.xlsx").unlink(missing_ok=True)   # no mezclar con corridas viejas
@@ -454,6 +489,9 @@ def limpiar_antes(archivo: str) -> str:
     print(f"🧹 limpieza: {r['total']} filas ({r['filas_expandidas']} por menciones), "
           f"{r['unicos']} únicas, {r['duplicados']} duplicadas, "
           f"{len(r['medios_sin_region'])} medios sin región → {destino.relative_to(AQUI)}")
+    c = contexto.agregar_contexto(destino, cliente, separar(alias), separar(voceros))
+    print(f"🔎 contexto: {c['con_mencion']} con mención, {c['desde_lead']} desde el lead, "
+          f"{c['solo_titulo']} solo título")
     return f"entregas/{destino.name}"
 
 
@@ -466,7 +504,6 @@ def leer_argumentos() -> str:
     p.add_argument("--alias", default="", help="siglas o nombres alternos, separados por coma")
     p.add_argument("--voceros", default="", help="personas que hablan por la marca, separadas por coma")
     p.add_argument("--archivo", help="xlsx relativo a workspace/, p. ej. datos/noticias.xlsx")
-    p.add_argument("--columnas", default=COLUMNAS_TEXTO, help=f"por defecto: {COLUMNAS_TEXTO}")
     p.add_argument("--limpiar", dest="limpiar", action="store_true", default=True,
                    help="limpia y ordena el xlsx antes de clasificar (por defecto)")
     p.add_argument("--sin-limpiar", dest="limpiar", action="store_false",
@@ -487,7 +524,7 @@ def leer_argumentos() -> str:
     if a.modo == "xlsx" and not a.archivo:
         a.archivo = input("Archivo xlsx (relativo a workspace/, p. ej. datos/noticias.xlsx): ").strip()
     if a.modo == "xlsx" and a.limpiar:
-        a.archivo = limpiar_antes(a.archivo)
+        a.archivo = limpiar_antes(a.archivo, a.cliente, a.alias, a.voceros)
     prompt = armar_prompt(a)
     if a.pedido:
         prompt += "\nIndicaciones adicionales: " + " ".join(a.pedido)
