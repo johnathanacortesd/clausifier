@@ -1,0 +1,8 @@
+.env
+.venv/
+node_modules/
+__pycache__/
+salidas/
+.streamlit/secrets.toml
+workspace/datos/*.xlsx
+workspace/entregas/
