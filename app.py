@@ -80,8 +80,18 @@ tab_xlsx, tab_portales = st.tabs(["Clasificar xlsx", "Comparar portales"])
 
 with tab_xlsx:
     subido = st.file_uploader("Archivo xlsx", type=["xlsx"])
-    columnas = st.text_input("Columnas con el texto", value=agente.COLUMNAS_TEXTO)
-    if st.button("Clasificar", type="primary", disabled=not (cliente and subido)):
+    columnas = ""
+    if subido:
+        import openpyxl
+        hoja = openpyxl.load_workbook(io.BytesIO(subido.getvalue()), read_only=True).active
+        encabezado = [h for h in next(hoja.iter_rows(max_row=1, values_only=True)) if h]
+        sugeridas = agente.detectar_columnas(encabezado)
+        elegidas = st.multiselect("Columnas con el texto de la noticia (título primero)",
+                                  [str(h) for h in encabezado], default=sugeridas)
+        if not elegidas:
+            st.warning("Elige al menos una columna con el título o el cuerpo de la noticia.")
+        columnas = ",".join(elegidas)
+    if st.button("Clasificar", type="primary", disabled=not (cliente and subido and columnas)):
         datos = agente.WORKSPACE / "datos"
         datos.mkdir(parents=True, exist_ok=True)
         nombre = os.path.basename(subido.name)

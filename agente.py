@@ -74,27 +74,64 @@ def _columna(encabezado: list[Any], nombre: str) -> int:
     raise KeyError(f"No existe la columna '{nombre}'. Columnas: {[h for h in encabezado if h]}")
 
 
+# Nombres conocidos en los distintos formatos de monitoreo (orden = preferencia).
+CANDIDATOS_ID = ["ID Noticia", "NoticiaId", "Id Noticia", "ID"]
+CANDIDATOS_TITULO = ["Título", "Titular", "Title"]
+CANDIDATOS_CUERPO = ["Resumen - Aclaracion", "CuerpoEs", "Cuerpo", "Resumen", "texto", "Contenido"]
+
+
+def _buscar(encabezado: list[Any], candidatos: list[str]) -> int | None:
+    for c in candidatos:
+        try:
+            return _columna(encabezado, c)
+        except KeyError:
+            continue
+    return None
+
+
+def detectar_columnas(encabezado: list[Any]) -> list[str]:
+    """Título + todas las columnas de cuerpo que existan (p. ej. Resumen - Aclaracion y CuerpoEs)."""
+    elegidas = []
+    i = _buscar(encabezado, CANDIDATOS_TITULO)
+    if i is not None:
+        elegidas.append(str(encabezado[i]))
+    for c in CANDIDATOS_CUERPO:
+        i = _buscar(encabezado, [c])
+        if i is not None and str(encabezado[i]) not in elegidas:
+            elegidas.append(str(encabezado[i]))
+        if len(elegidas) >= 3:                 # título + 2 cuerpos: suficiente señal, pocos tokens
+            break
+    return elegidas
+
+
 @tool(
     "leer_noticias",
     "Lee un archivo .xlsx de monitoreo de medios y devuelve una fila por noticia con id, "
     "medio, fecha, el texto de las columnas pedidas y 'grupo' (noticias con el mismo título "
     "comparten grupo). 'archivo': nombre o ruta del xlsx (p. ej. 'datos/noticias sec.xlsx'). "
-    "'columnas': nombres separados por ',' o '|', o vacío para 'Título,Resumen - Aclaracion'.",
+    "'columnas': nombres separados por ',' o '|'; vacío o inexistentes = detecta solas título y "
+    "cuerpo (Título, Resumen - Aclaracion, CuerpoEs...). La respuesta dice qué columnas usó.",
     {"archivo": str, "columnas": str},
 )
 async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
     try:
         ruta = _ruta(args["archivo"])
         columnas = [c.strip() for c in re.split(r"[|,]", args.get("columnas") or "") if c.strip()]
-        columnas = columnas or COLUMNAS_POR_DEFECTO
         hoja = openpyxl.load_workbook(ruta, read_only=True, data_only=True).active
         filas = list(hoja.iter_rows(values_only=True))
         encabezado = list(filas[0])
-        idx = {c: _columna(encabezado, c) for c in columnas}
-        try:
-            i_id = _columna(encabezado, "ID Noticia")
-        except KeyError:
-            i_id = None
+        # Usa las columnas pedidas que existan; si ninguna existe, detecta título y cuerpo solas.
+        idx = {}
+        for c in columnas:
+            i = _buscar(encabezado, [c])
+            if i is not None:
+                idx[str(encabezado[i])] = i
+        if not idx:
+            idx = {c: _columna(encabezado, c) for c in detectar_columnas(encabezado)}
+        if not idx:
+            raise KeyError(f"No encuentro columnas de título ni de cuerpo. Columnas: {[h for h in encabezado if h]}")
+        columnas = list(idx)
+        i_id = _buscar(encabezado, CANDIDATOS_ID)
         i_medio = next((i for i, h in enumerate(encabezado) if _normal(h) == _normal("Medio")), None)
         i_fecha = next((i for i, h in enumerate(encabezado) if _normal(h) == _normal("Fecha")), None)
 
@@ -118,7 +155,7 @@ async def leer_noticias(args: dict[str, Any]) -> dict[str, Any]:
         return {"content": [{"type": "text", "text": f"Error leyendo el archivo: {e}"}], "is_error": True}
 
     print(f"  >>> leer_noticias: {len(salida)} noticias, {len(grupos)} títulos distintos")
-    texto = json.dumps({"archivo": ruta.name, "total": len(salida), "noticias": salida},
+    texto = json.dumps({"archivo": ruta.name, "columnas_usadas": columnas, "total": len(salida), "noticias": salida},
                        ensure_ascii=False, separators=(",", ":"))
     return {"content": [{"type": "text", "text": texto}]}
 
@@ -155,10 +192,8 @@ async def guardar_clasificacion(args: dict[str, Any]) -> dict[str, Any]:
                 hoja.cell(row=1, column=len(encabezado) + 1, value=nombre)
                 encabezado.append(nombre)
         c_tono, c_tema = encabezado.index("Tono C") + 1, encabezado.index("Tema C") + 1
-        try:
-            c_id = _columna(encabezado, "ID Noticia") + 1
-        except KeyError:
-            c_id = None
+        c_id = _buscar(encabezado, CANDIDATOS_ID)
+        c_id = c_id + 1 if c_id is not None else None
 
         faltantes = []
         for r in range(2, hoja.max_row + 1):
