@@ -17,6 +17,20 @@ import streamlit as st
 
 st.set_page_config(page_title="clausifier", page_icon="📰", layout="wide")
 
+# Estilo terminal claro: colores en .streamlit/config.toml; aquí solo tipografía y bordes.
+st.markdown("""
+<style>
+  h1, h2, h3 { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace !important;
+               letter-spacing: -0.01em; }
+  h1::before { content: "> "; color: #D97757; }
+  .stCodeBlock, [data-testid="stCode"] pre { border: 1px solid #E3DFD3; border-radius: 0.5rem;
+                                              background: #FFFFFF !important; }
+  [data-testid="stMetric"] { border: 1px solid #E3DFD3; border-radius: 0.5rem; padding: 0.5rem 0.75rem;
+                             background: #FFFFFF; }
+  .stButton > button, .stDownloadButton > button { font-family: ui-monospace, Menlo, Consolas, monospace; }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ─── Contraseña ───────────────────────────────────────────────────────────
 def acceso_ok() -> bool:
@@ -72,7 +86,7 @@ async def correr(prompt: str, salida) -> None:
 
 
 # ─── Formulario ───────────────────────────────────────────────────────────
-st.title("📰 clausifier")
+st.title("clausifier")
 st.caption("Clasifica noticias (Tono y Subtema) y compara la cobertura de un cliente en 5 portales.")
 
 cliente = st.text_input("Cliente (marca) *")
