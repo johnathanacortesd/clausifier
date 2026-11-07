@@ -200,3 +200,22 @@ elegir columnas: el agente lee el Contexto analizado. **Solo limpiar ($0)** no l
 limpia, agrega Contexto analizado y texto y ofrece el xlsx para descargar (pide el cliente).
 
 En local: copia `.streamlit/secrets.toml.example` a `.streamlit/secrets.toml`, llénalo y corre `uv run streamlit run app.py`.
+
+### Interfaz de API_2_Grill (agregado después)
+
+`app.py` replica la interfaz de API_2_Grill con la paleta crema/terracota: encabezado, pestañas
+**Dossier estándar / Columnas personalizadas / Comparar portales**, panel "Procesando dossier de
+noticias" con la lista de pasos (incluye "Menciones y duplicadas") y la barra de páginas, y la
+pantalla de resultados con las tarjetas Total / Únicos / Duplicados / Tiempo / Costo IA.
+
+- **Perfiles de cliente** (`perfil_cliente.py`, JSON en `clientes/`): marca, alias, voceros,
+  criterio del tono, criterio personalizado y notas. En Streamlit Cloud el disco es efímero:
+  descarga el JSON del perfil y vuelve a subirlo cuando lo necesites.
+- **Criterio del tono** (`criterios.py`, copiado de Grill): el elegido, o el texto propio del
+  cliente si lo hay, va literal al prompt de Haiku en un bloque `<criterio_tono>`; el agente se lo
+  pasa al revisor-subtemas. En la terminal: `--criterio sector` o `--criterio-texto "..."`.
+- **Duplicadas**: además del conteo, una tabla con ID duplicada → ID original, título, medio,
+  tipo de medio y motivo (URL + mención, o medio + hora + mención en radio/TV).
+- Los deslizadores "Similitud de titulares/resúmenes" mueven los umbrales de `candidatos_consistencia`.
+- No están (no aplican sin OpenAI): PKL, Jev, selector de modelo, votos, llamadas en paralelo,
+  grupos por llamada, lista de Temas/Tema_IA y Prominencia.

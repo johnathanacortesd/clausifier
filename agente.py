@@ -506,6 +506,7 @@ TONO: Positivo, Neutro o Negativo, evaluado solo desde la perspectiva del client
 - Positivo: gestiones a favor, logros, reconocimientos, inversiones u obras del cliente.
 - Negativo: críticas, denuncias, sanciones o afectación directa a la marca.
 - Neutro: menciones generales o informativas sin efecto claro para el cliente, o noticias donde el cliente no aparece.
+Si el pedido trae un bloque <criterio_tono>, ese criterio del cliente MANDA: aplícalo a cada fila por encima de estas definiciones generales, y pásaselo completo y literal al ayudante revisor-subtemas cuando lo lances.
 
 Consistencia, en este orden:
 1. Lee TODAS las filas antes de asignar nada.
@@ -601,7 +602,8 @@ opciones = ClaudeAgentOptions(
                 "palabras) para distinguirlas. Los grupos 'posible_sobreagrupacion' casi siempre son "
                 "hechos distintos que comparten un subtema demasiado genérico.\n"
                 "Nunca fusiones solo porque los subtemas comparten palabras. No agrupes por agrupar.\n"
-                "Tono solo Positivo, Neutro o Negativo, para el cliente. No escribes archivos.\n"
+                "Tono solo Positivo, Neutro o Negativo, para el cliente. Si te pasan un CRITERIO DEL "
+                "TONO, decide el tono con ese criterio. No escribes archivos.\n"
                 "Responde SOLO con JSON compacto, sin texto alrededor: "
                 '{"correcciones":[{"id":"...","tema":"...","tono":"..."}],'
                 '"grupos":[{"grupo":0,"mismo_hecho":true,"razon":"una línea"}]}. '
@@ -696,7 +698,20 @@ def armar_prompt(a: Any) -> str:
                 "Busca las noticias más recientes del cliente (usa cliente, alias y voceros en las "
                 "búsquedas) en cinco portales colombianos y escribe entregas/comparativo.md.")
     return (f"Modo clasificar xlsx.\nARCHIVO: {a.archivo}\nCLIENTE: {a.cliente}{extra_txt}\n"
+            f"{bloque_criterio(a)}"
             "Clasifica todas las filas con TONO y TEMA y guárdalas con guardar_clasificacion.")
+
+
+def bloque_criterio(a: Any) -> str:
+    """Criterio del tono elegido en la app (radio de Grill) o texto propio del cliente (tiene prioridad)."""
+    from criterios import CRITERIOS_TONO
+    propio = (getattr(a, "criterio_texto", "") or "").strip()
+    nombre = getattr(a, "criterio", None)
+    texto = propio or CRITERIOS_TONO.get(nombre or "", "")
+    if not texto:
+        return ""
+    etiqueta = "personalizado del cliente" if propio else nombre
+    return f"<criterio_tono nombre=\"{etiqueta}\">\n{texto}\n</criterio_tono>\n"
 
 
 def separar(texto: str | None) -> list[str]:
@@ -727,11 +742,18 @@ def leer_argumentos() -> str:
     p.add_argument("--alias", default="", help="siglas o nombres alternos, separados por coma")
     p.add_argument("--voceros", default="", help="personas que hablan por la marca, separadas por coma")
     p.add_argument("--archivo", help="xlsx relativo a workspace/, p. ej. datos/noticias.xlsx")
+    p.add_argument("--criterio", default=None,
+                   help="criterio del tono: 'aspectual' o 'sector' (como el radio de la app)")
+    p.add_argument("--criterio-texto", dest="criterio_texto", default="",
+                   help="criterio del tono propio del cliente (tiene prioridad sobre --criterio)")
     p.add_argument("--limpiar", dest="limpiar", action="store_true", default=True,
                    help="limpia y ordena el xlsx antes de clasificar (por defecto)")
     p.add_argument("--sin-limpiar", dest="limpiar", action="store_false",
                    help="clasifica el xlsx tal cual, sin limpieza previa")
     a = p.parse_args()
+    if a.criterio:
+        from criterios import CRITERIOS_TONO
+        a.criterio = next((k for k in CRITERIOS_TONO if a.criterio.lower() in k.lower()), a.criterio)
 
     usa_flags = any([a.cliente, a.archivo, a.alias, a.voceros, a.modo == "portales"])
     if a.modo == "portales" or (a.pedido and "portal" in " ".join(a.pedido).lower()):

@@ -14,7 +14,7 @@ import os
 import re
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
@@ -302,15 +302,16 @@ def detectar_duplicados_avanzado(rows, km=KEY_MAP):
             hora = _normalizar_hora(row.get(km["hora"]))
             if not medio or not hora:
                 continue
-            k, seen = (mencion, medio, hora), seen_bcast
+            k, seen, motivo = (mencion, medio, hora), seen_bcast, "medio + hora + mención (radio/TV)"
         else:
             url = _normalizar_url(_extract_url(row.get("URL Nota")) or _extract_url(row.get(km["link_streaming"])))
             if not url:
                 continue
-            k, seen = (url, mencion), seen_url
+            k, seen, motivo = (url, mencion), seen_url, "URL + mención"
         if k in seen:
             row["is_duplicate"] = True
             row[km["idduplicada"]] = rows[seen[k]].get(km["idnoticia"], "")
+            row["_motivo_dup"] = motivo
         else:
             seen[k] = i
     return rows
@@ -580,6 +581,17 @@ def limpiar_dossier(ruta_entrada, ruta_salida) -> dict:
     _escribir_xlsx(rows, cols, ruta_salida)
 
     duplicados = sum(1 for r in rows if r.get("is_duplicate"))
+    # Reporte de duplicadas (como API_2_Grill las marca en «ID duplicada»): cuál es cuál y por qué.
+    lista_dup = [{
+        "Fila": r.get(COL_FILA),
+        "ID duplicada": r.get("ID Noticia", ""),
+        "ID original": r.get(COL_DUP, ""),
+        "Título": clean_title_for_output(r.get(col_titulo, "")) if col_titulo else "",
+        "Medio": r.get("Medio", ""),
+        "Tipo de Medio": r.get("Tipo de Medio", ""),
+        "Mención": r.get("Menciones - Empresa", ""),
+        "Motivo": r.get("_motivo_dup", ""),
+    } for r in rows if r.get("is_duplicate")]
     return {
         "archivo": str(ruta_salida),
         "filas_entrada": n_filas,
@@ -588,5 +600,54 @@ def limpiar_dossier(ruta_entrada, ruta_salida) -> dict:
         "duplicados": duplicados,
         "filas_expandidas": len(rows) - n_filas,
         "medios_sin_region": medios_sin_region,
+        "duplicadas": lista_dup,
         "columnas": cols,
     }
+
+
+# ─── Columnas personalizadas (como la pestaña de API_2_Grill) ───────────────
+def leer_columnas_xlsx(file_bytes: bytes) -> List[str]:
+    """Encabezados no vacíos de la primera hoja."""
+    import openpyxl
+    try:
+        hoja = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True).active
+        fila = next(hoja.iter_rows(max_row=1, values_only=True), ())
+    except Exception:  # noqa: BLE001
+        return []
+    return [str(c).strip() for c in fila if c is not None and str(c).strip()]
+
+
+def sugerir_columna(etiquetas: List[str], candidatos) -> Optional[str]:
+    """Primera etiqueta que coincide (sin tildes ni mayúsculas) con un candidato."""
+    norm = {norm_key(e): e for e in etiquetas}
+    for c in candidatos:
+        if norm_key(c) in norm:
+            return norm[norm_key(c)]
+    for c in candidatos:
+        for e in etiquetas:
+            if norm_key(c) and norm_key(c) in norm_key(e):
+                return e
+    return None
+
+
+def renombrar_columnas_xlsx(file_bytes: bytes, col_titulo: str, col_cuerpo: str) -> bytes:
+    """Renombra las columnas elegidas a «Título» y «Resumen - Aclaracion» (solo el encabezado:
+    datos e hipervínculos quedan intactos). Lanza ValueError si falta alguna."""
+    import openpyxl
+    if col_titulo == col_cuerpo:
+        raise ValueError("La columna de título y la de cuerpo deben ser diferentes.")
+    libro = openpyxl.load_workbook(io.BytesIO(file_bytes))
+    hoja = libro.active
+    enc = {str(c.value).strip(): c for c in hoja[1] if c.value is not None}
+    for elegida in (col_titulo, col_cuerpo):
+        if elegida not in enc:
+            raise ValueError(f"No existe la columna «{elegida}» en el archivo.")
+    destinos = {col_titulo: "Título", col_cuerpo: "Resumen - Aclaracion"}
+    for nombre, celda in enc.items():           # libera los nombres destino si ya existían
+        if nombre in destinos.values() and nombre not in destinos:
+            celda.value = f"{nombre} (original)"
+    for origen, nuevo in destinos.items():
+        enc[origen].value = nuevo
+    salida = io.BytesIO()
+    libro.save(salida)
+    return salida.getvalue()

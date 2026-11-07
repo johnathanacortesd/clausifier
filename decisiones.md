@@ -73,3 +73,11 @@ Versiones contra las que se probó: **Python SDK 0.2.176** (empaca Claude Code 2
 - Contextos de menos de 120 car. (p. ej. 'Fuente: Alcaldía de Bogotá') no cuentan para similitud: encadenaban hechos distintos.
 - Bug corregido: `hoja.cell(..., value=None)` no borra en openpyxl; ahora se asigna `.value = None` al empezar una corrida (antes una entrada ya clasificada dejaba el 'faltan 0' sin sentido).
 - App: el log crudo va a 'Ver detalle técnico'; la vista muestra paso, barra de páginas y resumen. El ayudante corre en segundo plano y llegan dos ResultMessage: se suman turnos y se toma el costo acumulado.
+
+## Interfaz de API_2_Grill (agregado después)
+
+- Se copió la interfaz de Grill (pasos, tarjetas, pestañas, perfiles) porque el equipo ya la conoce; solo cambia la paleta.
+- El criterio del tono viaja en el prompt del usuario, no en el system prompt fijo: así cada corrida usa el criterio de su cliente sin reconstruir `opciones`. El system prompt solo dice que ese bloque manda.
+- `limpiar_dossier` devuelve `duplicadas` (lista con original y motivo) para mostrar cuáles son, no solo cuántas.
+- Se dejaron fuera los controles de Grill sin efecto en clausifier (PKL, Jev, votos, workers, Tema_IA, Prominencia): un control muerto confunde.
+- Los perfiles en disco se pierden al reiniciar Streamlit Cloud; por eso hay descarga y carga del JSON.
